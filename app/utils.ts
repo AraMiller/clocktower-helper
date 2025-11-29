@@ -37,7 +37,11 @@ export function calculateNightInfo(seats: Seat[], currentSeatId: number, gamePha
         if(pool.length > 0) {
             const t = pool[Math.floor(Math.random()*pool.length)];
             const d = seats.find(s => s.id !== t.id && s.id !== targetSeat.id);
-            real = `展示【${t.role?.name}】，指向 [${t.id+1}号] 和 [${d?.id+1}号]`;
+            if (d) {
+                real = `展示【${t.role?.name}】，指向 [${t.id+1}号] 和 [${d.id+1}号]`;
+            } else {
+                real = `展示【${t.role?.name}】，指向 [${t.id+1}号]`;
+            }
             fake = "展示错误信息";
         } else { real="无角色显示0"; fake="显示1"; }
     } else {

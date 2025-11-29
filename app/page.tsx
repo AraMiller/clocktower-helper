@@ -966,10 +966,21 @@ export default function Home() {
       }
       if(action === 'protect') {
         if (nightInfo) {
-          const isMonkPoisoned = nightInfo.isPoisoned;
-          // 如果僧侣中毒/醉酒，不设置保护效果，但可以正常选择玩家
+          // 使用nightInfo.isPoisoned和seats状态双重检查，确保判断准确
+          const monkSeat = seats.find(s => s.id === nightInfo.seat.id);
+          const isMonkPoisoned = nightInfo.isPoisoned || 
+                                 (monkSeat ? (monkSeat.isPoisoned || monkSeat.isDrunk || monkSeat.role?.id === "drunk") : false);
+          
+          // 如果僧侣中毒/醉酒，绝对不能设置保护效果，但可以正常选择玩家
           if (isMonkPoisoned) {
-            setSeats(p => p.map(s => ({...s, isProtected: false, protectedBy: null})));
+            // 强制清除所有保护状态，确保不会有任何保护效果
+            setSeats(p => p.map(s => {
+              // 如果这个玩家是被当前僧侣保护的，清除保护
+              if (s.protectedBy === nightInfo.seat.id) {
+                return {...s, isProtected: false, protectedBy: null};
+              }
+              return s;
+            }));
             // 记录日志：选择但无保护效果
             setGameLogs(prev => {
               const filtered = prev.filter(log => 
@@ -978,8 +989,11 @@ export default function Home() {
               return [...filtered, { day: nightCount, phase: gamePhase, message: `${nightInfo.seat.id+1}号(僧侣) 选择保护 ${tid+1}号，但中毒/醉酒状态下无保护效果` }];
             });
           } else {
-            // 健康状态下正常保护
-            setSeats(p => p.map(s => ({...s, isProtected: s.id === tid, protectedBy: s.id === tid ? nightInfo.seat.id : s.protectedBy})));
+            // 健康状态下正常保护：先清除所有保护，然后只设置目标玩家的保护
+            setSeats(p => {
+              const updated = p.map(s => ({...s, isProtected: false, protectedBy: null}));
+              return updated.map(s => s.id === tid ? {...s, isProtected: true, protectedBy: nightInfo.seat.id} : s);
+            });
             setGameLogs(prev => {
               const filtered = prev.filter(log => 
                 !(log.message.includes(`${nightInfo.seat.id+1}号(僧侣)`) && log.phase === gamePhase)
@@ -1180,14 +1194,27 @@ export default function Home() {
     } else {
       // 正常杀死其他玩家
       const target = seats.find(s => s.id === targetId);
-      // 检查保护是否有效：如果被保护，需要检查保护者（僧侣）是否中毒/醉酒
+      // 检查保护是否有效：如果被保护，必须检查保护者（僧侣）是否中毒/醉酒
+      // 关键：中毒/醉酒状态下的僧侣的保护绝对无效
       let isEffectivelyProtected = false;
       if (target?.isProtected && target.protectedBy !== null) {
         const protector = seats.find(s => s.id === target.protectedBy);
         if (protector) {
-          // 如果保护者中毒/醉酒，保护无效
+          // 如果保护者中毒/醉酒，保护绝对无效，无论isProtected是否为true
           const isProtectorPoisoned = protector.isPoisoned || protector.isDrunk || protector.role?.id === "drunk";
-          isEffectivelyProtected = !isProtectorPoisoned;
+          if (isProtectorPoisoned) {
+            // 保护者中毒/醉酒，保护无效，同时清除错误的保护状态
+            isEffectivelyProtected = false;
+            setSeats(p => p.map(s => 
+              s.id === targetId ? {...s, isProtected: false, protectedBy: null} : s
+            ));
+          } else {
+            // 保护者健康，保护有效
+            isEffectivelyProtected = true;
+          }
+        } else {
+          // 保护者不存在，保护无效
+          isEffectivelyProtected = false;
         }
       }
       if(target && !isEffectivelyProtected && target.role?.id !== 'soldier' && !target.isDead) {

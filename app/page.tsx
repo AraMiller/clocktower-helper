@@ -579,6 +579,7 @@ export default function Home() {
   const [executedPlayerId, setExecutedPlayerId] = useState<number | null>(null);
   const [gameLogs, setGameLogs] = useState<LogEntry[]>([]);
   const [winResult, setWinResult] = useState<WinResult>(null);
+  const [winReason, setWinReason] = useState<string | null>(null);
   
   const [startTime, setStartTime] = useState<Date | null>(null);
   const [timer, setTimer] = useState(0);
@@ -608,7 +609,10 @@ export default function Home() {
   const [showRavenkeeperFakeModal, setShowRavenkeeperFakeModal] = useState<number | null>(null);
   const [showRavenkeeperResultModal, setShowRavenkeeperResultModal] = useState<{targetId: number, roleName: string, isFake: boolean} | null>(null);
   const [showVoteInputModal, setShowVoteInputModal] = useState<number | null>(null);
+  const [voteInputValue, setVoteInputValue] = useState<string>('');
+  const [showVoteErrorToast, setShowVoteErrorToast] = useState(false);
   const [showReviewModal, setShowReviewModal] = useState(false);
+  const [showRoleInfoModal, setShowRoleInfoModal] = useState(false);
   const [showExecutionResultModal, setShowExecutionResultModal] = useState<{message: string, isVirginTrigger?: boolean} | null>(null);
   const [showShootResultModal, setShowShootResultModal] = useState<{message: string, isDemonDead: boolean} | null>(null);
   const [showKillConfirmModal, setShowKillConfirmModal] = useState<number | null>(null); // 恶魔确认杀死玩家
@@ -726,7 +730,7 @@ export default function Home() {
   }, [nightCount, gamePhase]);
 
   const nightInfo = useMemo(() => {
-    if ((gamePhase === "firstNight" || gamePhase === "night") && wakeQueueIds.length > 0) {
+    if ((gamePhase === "firstNight" || gamePhase === "night") && wakeQueueIds.length > 0 && currentWakeIndex >= 0 && currentWakeIndex < wakeQueueIds.length) {
       return calculateNightInfo(seats, wakeQueueIds[currentWakeIndex], gamePhase, lastDuskExecution, fakeInspectionResultRef.current || undefined, drunkFirstInfoRef.current);
     }
     return null;
@@ -806,6 +810,7 @@ export default function Home() {
     // 这个检查应该优先于其他检查，因为这是立即胜利条件
     if (aliveCount <= 2) {
       setWinResult('evil');
+      setWinReason(`场上仅存${aliveCount}位存活玩家`);
       setGamePhase('gameOver');
       addLog(`游戏结束：场上仅存${aliveCount}位存活玩家，邪恶阵营获胜`);
       return true;
@@ -818,6 +823,7 @@ export default function Home() {
       const allEvil = aliveSeats.every(s => isEvilForWinCondition(s));
       if (allEvil) {
         setWinResult('evil');
+        setWinReason('场上所有存活玩家都是邪恶阵营');
         setGamePhase('gameOver');
         addLog(`游戏结束：场上所有存活玩家都是邪恶阵营，邪恶阵营获胜`);
         return true;
@@ -838,13 +844,15 @@ export default function Home() {
     // 只有当所有恶魔（包括"小恶魔（传）"）都死亡时，好人才胜利
     if (deadDemon && !aliveDemon) {
       setWinResult('good');
-      setGamePhase('gameOver');
       // 判断是原小恶魔还是"小恶魔（传）"死亡
       if (deadDemon.isDemonSuccessor) {
+        setWinReason('小恶魔（传）死亡');
         addLog("游戏结束：小恶魔（传）死亡，好人胜利");
       } else {
+        setWinReason('小恶魔死亡');
         addLog("游戏结束：小恶魔死亡，好人胜利");
       }
+      setGamePhase('gameOver');
       return true;
     }
     
@@ -855,6 +863,7 @@ export default function Home() {
       );
       if (!scarletWoman) {
         setWinResult('good');
+        setWinReason('恶魔死亡');
         setGamePhase('gameOver');
         addLog("游戏结束：恶魔死亡，好人胜利");
         return true;
@@ -864,6 +873,7 @@ export default function Home() {
     const mayor = updatedSeats.find(s => s.role?.id === 'mayor' && !s.isDead);
     if (aliveCount === 3 && mayor && gamePhase === 'day') {
       setWinResult('good');
+      setWinReason('3人存活且无人被处决（市长能力）');
       setGamePhase('gameOver');
       addLog("游戏结束：3人存活且无人被处决，好人胜利");
       return true;
@@ -1419,23 +1429,26 @@ export default function Home() {
       setSeats(newSeats);
       addLog(`${id+1}号(小恶魔) 被处决`);
       setWinResult('good');
+      setWinReason('小恶魔被处决');
       setGamePhase('gameOver');
       addLog("游戏结束：小恶魔被处决，好人胜利");
       return;
     }
     
     // 贞洁者逻辑：当真正的镇民在贞洁者健康状态下提名贞洁者时，且贞洁者也是本局游戏中首次被提名
+    // 即使提名者是中毒状态，也会被立即处决，并进入下一个黑夜
     if (t.role?.id === 'virgin' && !t.hasUsedVirginAbility && !t.isPoisoned && !virginNominatedThisGame) {
       const nominatorId = showVoteInputModal;
       if (nominatorId !== null) {
         const nominator = seats.find(s => s.id === nominatorId);
         // 检查提名者是否是真正的镇民（不是酒鬼伪装的）
+        // 注意：即使提名者是中毒状态，也会被立即处决
         const isRealTownsfolk = nominator && 
                                 nominator.role?.type === 'townsfolk' && 
                                 nominator.role?.id !== 'drunk' &&
                                 !nominator.isDrunk;
         if (isRealTownsfolk) {
-          // 贞洁者首次被提名，立即处决提名者
+          // 贞洁者首次被提名，立即处决提名者（无视任何规则，包括中毒状态），并立即进入下一个黑夜
           setVirginNominatedThisGame(true);
           const updatedSeats = newSeats.map(s => 
             s.id === nominatorId ? { ...s, isDead: true } : 
@@ -1447,8 +1460,16 @@ export default function Home() {
           if (checkGameOver(updatedSeats)) {
             return;
           }
-          // 显示处决结果弹窗，标记为贞洁者触发
-          setShowExecutionResultModal({ message: `${nominatorId+1}号玩家被处决`, isVirginTrigger: true });
+          // 贞洁者触发后，立即进入下一个黑夜（无需等待确认）
+          // 关闭投票输入弹窗
+          setShowVoteInputModal(null);
+          // 显示短暂提示后自动进入黑夜
+          setShowExecutionResultModal({ message: `${nominatorId+1}号玩家被处决（贞洁者触发）`, isVirginTrigger: true });
+          // 延迟500ms后自动进入黑夜，给用户看到提示的时间
+          setTimeout(() => {
+            setShowExecutionResultModal(null);
+            startNight(false);
+          }, 500);
           return;
         }
       }
@@ -1468,6 +1489,7 @@ export default function Home() {
     
     if(t?.role?.id === 'saint' && !t.isPoisoned) { 
       setWinResult('evil'); 
+      setWinReason('圣徒被处决');
       setGamePhase('gameOver'); 
       addLog("游戏结束：圣徒被处决，邪恶胜利");
       return; 
@@ -1493,12 +1515,47 @@ export default function Home() {
         // 5. 屏蔽浏览器弹窗
         return;
       }
+      
+      // 贞洁者逻辑：当真正的镇民在贞洁者健康状态下提名贞洁者时，且贞洁者也是本局游戏中首次被提名
+      // 即使提名者是中毒状态，也会被立即处决，并进入下一个黑夜
+      const target = seats.find(s => s.id === id);
+      const nominator = seats.find(s => s.id === sourceId);
+      
+      if (target?.role?.id === 'virgin' && !target.hasUsedVirginAbility && !target.isPoisoned && !virginNominatedThisGame) {
+        // 检查提名者是否是真正的镇民（不是酒鬼伪装的）
+        // 注意：即使提名者是中毒状态，也会被立即处决
+        const isRealTownsfolk = nominator && 
+                                nominator.role?.type === 'townsfolk' && 
+                                nominator.role?.id !== 'drunk' &&
+                                !nominator.isDrunk;
+        if (isRealTownsfolk) {
+          // 贞洁者首次被提名，立即处决提名者（无视任何规则，包括中毒状态），并立即进入下一个黑夜
+          setVirginNominatedThisGame(true);
+          const updatedSeats = seats.map(s => 
+            s.id === sourceId ? { ...s, isDead: true } : 
+            s.id === id ? { ...s, hasUsedVirginAbility: true } : s
+          );
+          setSeats(updatedSeats);
+          addLog(`${sourceId+1}号 提名 ${id+1}号`);
+          addLog(`${sourceId+1}号 提名贞洁者被处决`);
+          // 检查游戏结束条件
+          if (checkGameOver(updatedSeats)) {
+            return;
+          }
+          // 贞洁者触发后，显示弹窗，点击确认后进入下一个黑夜
+          setShowExecutionResultModal({ message: `${sourceId+1}号玩家被处决`, isVirginTrigger: true });
+          return;
+        }
+      }
+      
       // 更新提名记录
       setNominationRecords(prev => ({
         nominators: new Set(prev.nominators).add(sourceId),
         nominees: new Set(prev.nominees).add(id)
       }));
       addLog(`${sourceId+1}号 提名 ${id+1}号`); 
+      setVoteInputValue('');
+      setShowVoteErrorToast(false);
       setShowVoteInputModal(id);
     } else if(type==='slayer') {
       // 开枪可以在任意环节，但只有健康猎手选中恶魔才有效
@@ -1560,6 +1617,8 @@ export default function Home() {
     // 票数达到50%才会上处决台
     setSeats(p=>p.map(s=>s.id===showVoteInputModal?{...s,voteCount:v,isCandidate:v>=threshold}:s));
     addLog(`${showVoteInputModal+1}号 获得 ${v} 票${v>=threshold ? ' (上台)' : ''}`);
+    setVoteInputValue('');
+    setShowVoteErrorToast(false);
     setShowVoteInputModal(null);
   };
 
@@ -1735,6 +1794,46 @@ export default function Home() {
     if (confirm("确定重开?")) window.location.reload();
   };
 
+  // 重置游戏到setup阶段（再来一局）
+  const handleNewGame = () => {
+    setGamePhase('setup');
+    setNightCount(1);
+    setExecutedPlayerId(null);
+    setWakeQueueIds([]);
+    setCurrentWakeIndex(0);
+    setSelectedActionTargets([]);
+    setGameLogs([]);
+    setWinResult(null);
+    setDeadThisNight([]);
+    setSelectedRole(null);
+    setInspectionResult(null);
+    setCurrentHint({ isPoisoned: false, guide: "", speak: "" });
+    setTimer(0);
+    setStartTime(null);
+    setHistory([]);
+    setWinReason(null);
+    hintCacheRef.current.clear();
+    drunkFirstInfoRef.current.clear();
+    setSeats(Array.from({ length: 15 }, (_, i) => ({ 
+      id: i, 
+      role: null, 
+      charadeRole: null, 
+      isDead: false, 
+      isDrunk: false, 
+      isPoisoned: false, 
+      isProtected: false, 
+      protectedBy: null,
+      isRedHerring: false, 
+      isSentenced: false, 
+      masterId: null, 
+      hasUsedSlayerAbility: false, 
+      hasUsedVirginAbility: false, 
+      isDemonSuccessor: false, 
+      statusDetails: []
+    })));
+    setInitialSeats([]);
+  };
+
   // 9. 保存历史记录 - 改为普通函数，使用ref避免Hook依赖问题
   const saveHistory = () => {
     const state = gameStateRef.current;
@@ -1849,6 +1948,7 @@ export default function Home() {
         )}
         <div className="absolute pointer-events-none text-center z-0 top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2">
           <div className="text-6xl font-bold opacity-50 mb-4">{phaseNames[gamePhase]}</div>
+          <div className="text-xs text-gray-500 opacity-40 mb-2">design by Bai Gan Group</div>
           {gamePhase!=='setup' && (
             <div className="text-5xl font-mono text-yellow-300">{formatTimer(timer)}</div>
           )}
@@ -1911,16 +2011,16 @@ export default function Home() {
       </div>
 
       <div className="w-2/5 flex flex-col border-l border-gray-800 bg-gray-900/95 z-40">
-        <div className="px-4 py-2 border-b flex items-center justify-center gap-3 relative">
-          <span className="font-bold text-purple-400 text-xl">控制台</span>
+        <div className="px-4 py-2 pb-4 border-b flex items-center justify-between relative">
+          <span className="font-bold text-purple-400 text-xl scale-[1.3] origin-left">控制台</span>
           {nightInfo && (
-            <span className="text-base text-yellow-300 font-normal">
+            <span className="text-base text-yellow-300 font-normal absolute left-1/2 -translate-x-1/2">
               当前是{nightInfo.seat.id+1}号{nightInfo.effectiveRole.name}在行动
             </span>
           )}
-          <div className="flex gap-2 items-center">
+          <div className="flex gap-2 items-center scale-[1.3] origin-right">
             <button 
-              onClick={()=>{if(gamePhase==='gameOver')setShowReviewModal(true)}} 
+              onClick={()=>setShowReviewModal(true)} 
               className="px-2 py-1 bg-indigo-600 border rounded text-sm shadow-lg"
             >
               复盘
@@ -1933,6 +2033,12 @@ export default function Home() {
             </button>
             {showMenu && (
               <div className="absolute right-4 top-full mt-1 w-48 bg-gray-800 border rounded-lg shadow-xl z-[1000]">
+                <button 
+                  onClick={()=>{setShowRoleInfoModal(true);setShowMenu(false)}} 
+                  className="w-full p-4 text-left text-blue-400 hover:bg-gray-700 border-b border-gray-700"
+                >
+                  📖 角色信息
+                </button>
                 <button 
                   onClick={handleRestart} 
                   className="w-full p-4 text-left text-red-400 hover:bg-gray-700"
@@ -2261,7 +2367,7 @@ export default function Home() {
       
       {showVoteInputModal!==null && (
         <div className="fixed inset-0 z-[3000] bg-black/90 flex items-center justify-center">
-          <div className="bg-gray-800 p-8 rounded-2xl text-center border-2 border-blue-500">
+          <div className="bg-gray-800 p-8 rounded-2xl text-center border-2 border-blue-500 relative">
             <h3 className="text-3xl font-bold mb-6">🗳️ 输入票数</h3>
             <input 
               autoFocus 
@@ -2271,11 +2377,49 @@ export default function Home() {
                 ? initialSeats.filter(s => s.role !== null).length 
                 : seats.filter(s => s.role !== null).length}
               step="1"
+              value={voteInputValue}
               className="w-full p-4 bg-gray-700 rounded-xl mb-6 text-center text-4xl font-mono" 
-              onKeyDown={(e)=>{if(e.key==='Enter')submitVotes(parseInt(e.currentTarget.value)||0)}} 
+              onChange={(e) => {
+                const value = e.target.value;
+                const initialPlayerCount = initialSeats.length > 0 
+                  ? initialSeats.filter(s => s.role !== null).length 
+                  : seats.filter(s => s.role !== null).length;
+                
+                // 如果输入为空，允许继续输入
+                if (value === '') {
+                  setVoteInputValue('');
+                  return;
+                }
+                
+                const numValue = parseInt(value);
+                // 检查是否符合要求：必须是有效数字，且不超过开局时的玩家数
+                if (isNaN(numValue) || numValue < 1 || !Number.isInteger(numValue) || numValue > initialPlayerCount) {
+                  // 不符合要求，清空输入并显示浮窗
+                  setVoteInputValue('');
+                  setShowVoteErrorToast(true);
+                  // 3秒后自动消失
+                  setTimeout(() => {
+                    setShowVoteErrorToast(false);
+                  }, 3000);
+                } else {
+                  // 符合要求，更新输入值
+                  setVoteInputValue(value);
+                }
+              }}
+              onKeyDown={(e)=>{if(e.key==='Enter')submitVotes(parseInt(voteInputValue)||0)}} 
             />
+            {showVoteErrorToast && (
+              <div 
+                className="absolute left-0 right-0 bg-red-600/30 text-white text-sm px-4 py-2 rounded-lg shadow-lg z-10"
+                style={{
+                  top: 'calc(2rem + 1.5rem + 1.5rem + 1rem + 1.125rem)'
+                }}
+              >
+                票数不得超过开局时的玩家数
+              </div>
+            )}
             <button 
-              onClick={(e:any)=>submitVotes(parseInt(e.target.previousSibling.value)||0)} 
+              onClick={()=>submitVotes(parseInt(voteInputValue)||0)} 
               className="w-full py-4 bg-indigo-600 rounded-xl text-2xl font-bold"
             >
               确认
@@ -2417,58 +2561,195 @@ export default function Home() {
             <h1 className={`text-8xl font-bold mb-10 ${
               winResult==='good'?'text-blue-500':'text-red-500'
             }`}>
-              {winResult==='good'?'🏆 好人胜利':'👿 邪恶胜利'}
+              {winResult==='good'?'🏆 善良阵营胜利':'👿 邪恶阵营获胜'}
             </h1>
-            <button 
-              onClick={()=>setShowReviewModal(true)} 
-              className="px-10 py-5 bg-white text-black rounded-full text-3xl font-bold"
-            >
-              查看复盘
-            </button>
+            {winReason && (
+              <p className="text-xl text-gray-400 mb-8">
+                胜利依据：{winReason}
+              </p>
+            )}
+            <div className="flex gap-6 justify-center">
+              <button 
+                onClick={handleNewGame} 
+                className="px-10 py-5 bg-blue-600 hover:bg-blue-700 text-white rounded-full text-3xl font-bold transition-colors"
+              >
+                再来一局
+              </button>
+              <button 
+                onClick={()=>setShowReviewModal(true)} 
+                className="px-10 py-5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-full text-3xl font-bold transition-colors"
+              >
+                本局复盘
+              </button>
+            </div>
           </div>
         </div>
       )}
       
       {showReviewModal && (
         <div className="fixed inset-0 z-[5000] bg-black/95 flex flex-col p-10 overflow-auto">
-          <h2 className="text-4xl mb-6">📜 对局复盘</h2>
-          <div className="grid grid-cols-2 gap-8">
-            <div className="bg-gray-900 p-6 rounded">
-              <h3 className="text-xl font-bold mb-4">初始配置</h3>
-              {initialSeats.map(s=>(
-                <div key={s.id} className="mb-2">
-                  {s.id+1}号: {s.role?.name} 
-                  {s.role?.id==='drunk'&&`(伪:${s.charadeRole?.name})`}
-                  {s.isRedHerring && '[红罗刹]'}
-                </div>
-              ))}
-            </div>
-            <div className="bg-gray-900 p-6 rounded">
-              <h3 className="text-xl font-bold mb-4">行动日志</h3>
-              <div className="space-y-1 max-h-[60vh] overflow-y-auto">
-                {gameLogs.map((l,i)=>(
-                  <div key={i} className="text-sm border-b border-gray-700 pb-1">
-                    [{l.phase}] {l.message}
+          <div className="flex justify-between items-center mb-6">
+            <h2 className="text-4xl">📜 对局复盘</h2>
+            <button 
+              onClick={()=>setShowReviewModal(false)} 
+              className="px-6 py-2 bg-gray-700 hover:bg-gray-600 rounded text-lg"
+            >
+              关闭
+            </button>
+          </div>
+          <div className="bg-black/50 p-6 rounded-xl flex gap-6 h-[calc(100vh-12rem)]">
+            <div className="w-1/3">
+              <h4 className="text-purple-400 mb-4 font-bold border-b pb-2 text-xl">📖 当前座位信息</h4>
+              <div className="space-y-2 max-h-[calc(100vh-16rem)] overflow-y-auto">
+                {seats.filter(s=>s.role).map(s => (
+                  <div key={s.id} className="py-2 border-b border-gray-700 flex justify-between items-center">
+                    <span className="font-bold">{s.id+1}号</span>
+                    <div className="flex flex-col items-end">
+                      <span className={s.role?.type==='demon'?'text-red-500 font-bold':s.role?.type==='minion'?'text-orange-500':'text-blue-400'}>
+                        {s.role?.name}
+                        {s.role?.id==='drunk'&&` (伪:${s.charadeRole?.name})`}
+                        {s.isRedHerring && ' [红罗刹]'}
+                      </span>
+                      {s.isDead && <span className="text-xs text-gray-500 mt-1">💀 已死亡</span>}
+                      {s.isPoisoned && <span className="text-xs text-green-500 mt-1">🧪 中毒</span>}
+                      {s.isProtected && <span className="text-xs text-blue-500 mt-1">🛡️ 受保护</span>}
+                    </div>
                   </div>
                 ))}
               </div>
             </div>
+            <div className="w-2/3">
+              <h4 className="text-yellow-400 mb-4 font-bold border-b pb-2 text-xl">📋 操作记录</h4>
+              <div className="space-y-4 max-h-[calc(100vh-16rem)] overflow-y-auto">
+                {(() => {
+                  // 按阶段顺序组织日志：firstNight -> night -> day -> dusk
+                  const phaseOrder: Record<string, number> = {
+                    'firstNight': 1,
+                    'night': 2,
+                    'day': 3,
+                    'dusk': 4
+                  };
+                  
+                  // 按天数和阶段分组
+                  const logsByDayAndPhase = gameLogs.reduce((acc, log) => {
+                    const key = `${log.day}_${log.phase}`;
+                    if (!acc[key]) acc[key] = [];
+                    acc[key].push(log);
+                    return acc;
+                  }, {} as Record<string, LogEntry[]>);
+                  
+                  // 转换为数组并排序
+                  const sortedLogs = Object.entries(logsByDayAndPhase).sort((a, b) => {
+                    const [dayA, phaseA] = a[0].split('_');
+                    const [dayB, phaseB] = b[0].split('_');
+                    const dayNumA = parseInt(dayA);
+                    const dayNumB = parseInt(dayB);
+                    if (dayNumA !== dayNumB) return dayNumA - dayNumB;
+                    return (phaseOrder[phaseA] || 999) - (phaseOrder[phaseB] || 999);
+                  });
+                  
+                  return sortedLogs.map(([key, logs]) => {
+                    const [day, phase] = key.split('_');
+                    const phaseName = 
+                      phase === 'firstNight' ? '第1夜' : 
+                      phase === 'night' ? `第${day}夜` :
+                      phase === 'day' ? `第${day}天` :
+                      phase === 'dusk' ? `第${day}天黄昏` : `第${day}轮`;
+                    
+                    return (
+                      <div key={key} className="mb-4 bg-gray-900/50 p-4 rounded-lg">
+                        <div className="text-yellow-300 font-bold mb-3 text-lg border-b border-yellow-500/30 pb-2">
+                          {phaseName}
+                        </div>
+                        <div className="space-y-2">
+                          {logs.map((l, i) => (
+                            <div key={i} className="py-2 border-b border-gray-700 text-gray-300 text-sm pl-2">
+                              {l.message}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  });
+                })()}
+                {gameLogs.length === 0 && (
+                  <div className="text-gray-500 text-center py-8">
+                    暂无操作记录
+                  </div>
+                )}
+                {gamePhase === 'gameOver' && winReason && (
+                  <div className="mt-6 pt-4 border-t-2 border-yellow-500">
+                    <div className={`text-lg font-bold ${
+                      winResult === 'good' ? 'text-blue-400' : 'text-red-400'
+                    }`}>
+                      {winResult === 'good' ? '🏆 善良阵营胜利' : '👿 邪恶阵营获胜'}：{winReason}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
-          <button 
-            onClick={()=>window.location.reload()} 
-            className="mt-8 px-8 py-4 bg-red-600 rounded text-2xl self-center"
-          >
-            彻底重开
-          </button>
         </div>
       )}
 
-      {contextMenu && (
+      {showRoleInfoModal && (
+        <div className="fixed inset-0 z-[5000] bg-black/95 flex flex-col p-8 overflow-auto">
+          <div className="flex justify-between items-center mb-6">
+            <h2 className="text-4xl">📖 角色信息</h2>
+            <button 
+              onClick={()=>setShowRoleInfoModal(false)} 
+              className="px-6 py-2 bg-gray-700 hover:bg-gray-600 rounded text-lg"
+            >
+              确认
+            </button>
+          </div>
+          <div className="space-y-8">
+            {Object.entries(groupedRoles).map(([type, roleList]) => (
+              <div key={type} className="bg-gray-900/50 p-6 rounded-xl">
+                <h3 className={`text-2xl font-bold mb-4 ${typeColors[type]}`}>
+                  {typeLabels[type]}
+                </h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {roleList.map((role) => (
+                    <div 
+                      key={role.id} 
+                      className={`p-4 border-2 rounded-lg ${typeColors[type]} ${typeBgColors[type]} transition-all hover:scale-105`}
+                    >
+                      <div className="font-bold text-lg mb-2">{role.name}</div>
+                      <div className="text-sm text-gray-300 leading-relaxed">
+                        {role.ability}
+                      </div>
+                      {(role.firstNight || role.otherNight) && (
+                        <div className="mt-3 pt-3 border-t border-gray-700 text-xs text-gray-400">
+                          {role.firstNight && role.otherNight && (
+                            <div>首夜与其他夜晚行动</div>
+                          )}
+                          {role.firstNight && !role.otherNight && (
+                            <div>仅首夜行动</div>
+                          )}
+                          {!role.firstNight && role.otherNight && (
+                            <div>其他夜晚行动</div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {contextMenu && (() => {
+        const targetSeat = seats.find(s => s.id === contextMenu.seatId);
+        if (!targetSeat) return null;
+        return (
         <div 
           className="absolute bg-gray-800 border-2 border-gray-500 rounded-xl shadow-2xl z-[3000] w-48 overflow-hidden" 
           style={{top:contextMenu.y,left:contextMenu.x}}
         >
-          {gamePhase==='dusk' && !seats[contextMenu.seatId].isDead && (
+          {gamePhase==='dusk' && !targetSeat.isDead && (
             <button 
               onClick={()=>handleMenuAction('nominate')} 
               disabled={nominationRecords.nominators.has(contextMenu.seatId)}
@@ -2480,12 +2761,12 @@ export default function Home() {
             </button>
           )}
           {/* 开枪可以在任意环节（除了setup阶段） */}
-          {!seats[contextMenu.seatId].isDead && gamePhase !== 'setup' && (
+          {!targetSeat.isDead && gamePhase !== 'setup' && (
             <button 
               onClick={()=>handleMenuAction('slayer')} 
-              disabled={seats[contextMenu.seatId].hasUsedSlayerAbility}
+              disabled={targetSeat.hasUsedSlayerAbility}
               className={`block w-full text-left px-6 py-4 hover:bg-red-900 text-red-300 font-bold text-lg border-b border-gray-600 ${
-                seats[contextMenu.seatId].hasUsedSlayerAbility ? 'opacity-50 cursor-not-allowed' : ''
+                targetSeat.hasUsedSlayerAbility ? 'opacity-50 cursor-not-allowed' : ''
               }`}
             >
               💥 开枪
@@ -2498,7 +2779,8 @@ export default function Home() {
             💀 切换死亡
           </button>
         </div>
-      )}
+        );
+      })()}
       
       
       {/* 6. 处决结果弹窗 */}

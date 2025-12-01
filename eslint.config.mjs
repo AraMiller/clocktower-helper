@@ -1,3 +1,4 @@
+// by 拜甘教成员-大长老
 import { defineConfig, globalIgnores } from "eslint/config";
 import nextVitals from "eslint-config-next/core-web-vitals";
 import nextTs from "eslint-config-next/typescript";

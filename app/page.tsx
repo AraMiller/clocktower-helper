@@ -565,11 +565,18 @@ const calculateNightInfo = (
   return { seat: targetSeat, effectiveRole: finalEffectiveRole, isPoisoned, reason, guide, speak, action };
 };
 
+// ======================================================================
+//  暗流涌动 / 暗流涌动剧本 / 游戏的第一部分
+//  - 当前组件中，除「加载动画」(showIntroLoading / triggerIntroLoading 及对应 JSX)
+//    之外的所有状态、逻辑与界面，均属于「暗流涌动」剧本（游戏的第一部分）的实现。
+//  - 未来若新增其他剧本，可通过拆分/复用这里的结构作为参考。
+// ======================================================================
 export default function Home() {
   // ===========================
   //      STATE 定义 (完整，前置)
   // ===========================
   const [mounted, setMounted] = useState(false);
+  const [showIntroLoading, setShowIntroLoading] = useState(true); // Intro 加载动画（不属于具体剧本）
   const [seats, setSeats] = useState<Seat[]>([]);
   const [initialSeats, setInitialSeats] = useState<Seat[]>([]);
   
@@ -623,6 +630,7 @@ export default function Home() {
   const seatsRef = useRef(seats);
   const fakeInspectionResultRef = useRef<string | null>(null);
   const consoleContentRef = useRef<HTMLDivElement>(null);
+  const introTimeoutRef = useRef<any>(null);
   
   // 历史记录用于"上一步"功能
   const [history, setHistory] = useState<Array<{
@@ -660,6 +668,17 @@ export default function Home() {
     gameLogs
   });
   
+  const triggerIntroLoading = useCallback(() => {
+    setShowIntroLoading(true);
+    if (introTimeoutRef.current) {
+      clearTimeout(introTimeoutRef.current);
+    }
+    introTimeoutRef.current = setTimeout(() => {
+      setShowIntroLoading(false);
+      introTimeoutRef.current = null;
+    }, 2000);
+  }, []);
+
   // 更新ref
   useEffect(() => {
     gameStateRef.current = {
@@ -694,6 +713,15 @@ export default function Home() {
       isDemonSuccessor: false, 
       statusDetails: []
       })));
+      triggerIntroLoading();
+  }, [triggerIntroLoading]);
+
+  useEffect(() => {
+    return () => {
+      if (introTimeoutRef.current) {
+        clearTimeout(introTimeoutRef.current);
+      }
+    };
   }, []);
 
   useEffect(() => { 
@@ -883,7 +911,17 @@ export default function Home() {
   }, [addLog, gamePhase]);
 
   if (!mounted) return null;
-
+  
+  // ======================================================================
+  //  游戏流程 / 剧本流程 / 通用流程
+  //  - 以下与 gamePhase 相关的状态、函数和处理逻辑，
+  //    定义了当前剧本（暗流涌动）的整套通用流程：
+  //    「准备阶段 (setup) → 核对身份 (check) → 首夜 (firstNight)
+  //      → 白天 (day) → 黄昏/处决 (dusk) → 夜晚 (night)
+  //      → 天亮结算 (dawnReport) → 游戏结束 (gameOver)」。
+  //  - 未来如果开发新的剧本，可以整体复制 / 修改这一段流程代码，
+  //    作为新剧本的“游戏流程 / 剧本流程 / 通用流程”模板。
+  // ======================================================================
   // --- Handlers ---
   const isTargetDisabled = (s: Seat) => {
     if (!nightInfo) return true;
@@ -1796,6 +1834,7 @@ export default function Home() {
 
   // 重置游戏到setup阶段（再来一局）
   const handleNewGame = () => {
+    triggerIntroLoading();
     setGamePhase('setup');
     setNightCount(1);
     setExecutedPlayerId(null);
@@ -1927,6 +1966,21 @@ export default function Home() {
       }`} 
       onClick={()=>{setContextMenu(null);setShowMenu(false);}}
     >
+      {/* ===== 通用加载动画（不属于“暗流涌动”等具体剧本） ===== */}
+      {showIntroLoading && (
+        <div className="fixed inset-0 z-[9999] flex flex-col items-center justify-center bg-black">
+          <div className="font-sans text-5xl md:text-7xl font-black tracking-[0.1em] text-red-400 animate-breath-shadow">
+            拜甘教
+          </div>
+          <div className="mt-8 flex flex-col items-center gap-3">
+            <div className="h-10 w-10 rounded-full border-4 border-red-500 border-t-transparent animate-spin" />
+            <div className="text-base md:text-lg font-semibold text-red-200/90 font-sans tracking-widest">
+              祈祷中 ···
+            </div>
+          </div>
+        </div>
+      )}
+      {/* ===== 暗流涌动剧本（游戏第一部分）主界面 ===== */}
       <div className="w-3/5 relative flex items-center justify-center border-r border-gray-700">
         {/* 2. 万能上一步按钮 - 移到左侧圆桌右上角 */}
         {/* 支持无限次撤回，直到游戏开始（setup阶段） */}
@@ -1948,7 +2002,10 @@ export default function Home() {
         )}
         <div className="absolute pointer-events-none text-center z-0 top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2">
           <div className="text-6xl font-bold opacity-50 mb-4">{phaseNames[gamePhase]}</div>
-          <div className="text-xs text-gray-500 opacity-40 mb-2">design by Bai Gan Group</div>
+          <div className="text-xs text-gray-500 opacity-40 mb-2">
+            design by{" "}
+            <span className="font-bold italic">Bai  Gan Group</span>
+          </div>
           {gamePhase!=='setup' && (
             <div className="text-5xl font-mono text-yellow-300">{formatTimer(timer)}</div>
           )}

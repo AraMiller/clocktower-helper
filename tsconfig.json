@@ -1,4 +1,5 @@
 {
+  "//": "by 拜甘教成员-大长老",
   "compilerOptions": {
     "target": "ES2017",
     "lib": ["dom", "dom.iterable", "esnext"],

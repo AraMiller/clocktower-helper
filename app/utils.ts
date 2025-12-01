@@ -1,3 +1,4 @@
+// by 拜甘教成员-大长老
 // app/utils.ts
 import { Seat, Role, GamePhase, roles } from "./data";
 

@@ -1,3 +1,4 @@
+// by 拜甘教成员-大长老
 import type { Metadata } from "next";
 import "./globals.css";
 

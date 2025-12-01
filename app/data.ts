@@ -1,3 +1,4 @@
+// by 拜甘教成员-大长老
 // app/data.ts - 血染钟楼 Trouble Brewing 角色数据与类型定义
 
 export type RoleType = "townsfolk" | "outsider" | "minion" | "demon";
@@ -28,6 +29,8 @@ export interface Role {
   firstNightReminder?: string;
   otherNightReminder?: string;
   nightActionType?: NightActionType; 
+  // 剧本标记：例如 '暗流涌动'，用于区分不同剧本下的角色集合
+  script?: string;
 }
 
 export interface Seat {
@@ -74,6 +77,7 @@ export function getSeatPosition(index: number, total: number) {
 }
 
 // 角色数据 - 22个角色 (Trouble Brewing)
+// 当前文件中定义的所有角色均为「暗流涌动角色」（暗流涌动剧本 / 游戏的第一部分）
 export const roles: Role[] = [
   // ========== 镇民 (Townsfolk) - 13个 ==========
   { 
@@ -81,6 +85,7 @@ export const roles: Role[] = [
     name: "洗衣妇", 
     type: "townsfolk", 
     ability: "首夜得知一名村民的具体身份。", 
+    script: "暗流涌动", // 暗流涌动角色
     firstNight: true, 
     otherNight: false, 
     firstNightOrder: 4, 
@@ -93,6 +98,7 @@ export const roles: Role[] = [
     name: "图书管理员", 
     type: "townsfolk", 
     ability: "首夜得知一名外来者的具体身份。", 
+    script: "暗流涌动", // 暗流涌动角色
     firstNight: true, 
     otherNight: false, 
     firstNightOrder: 5, 
@@ -105,6 +111,7 @@ export const roles: Role[] = [
     name: "调查员", 
     type: "townsfolk", 
     ability: "首夜得知一名爪牙的具体身份。", 
+    script: "暗流涌动", // 暗流涌动角色
     firstNight: true, 
     otherNight: false, 
     firstNightOrder: 6, 
@@ -117,6 +124,7 @@ export const roles: Role[] = [
     name: "厨师", 
     type: "townsfolk", 
     ability: "首夜得知有多少对邪恶玩家相邻。", 
+    script: "暗流涌动", // 暗流涌动角色
     firstNight: true, 
     otherNight: false, 
     firstNightOrder: 7, 
@@ -135,7 +143,8 @@ export const roles: Role[] = [
     otherNightOrder: 8, 
     nightActionType: "none", 
     firstNightReminder: "查邻居", 
-    otherNightReminder: "查邻居" 
+    otherNightReminder: "查邻居",
+    script: "暗流涌动", // 暗流涌动角色 
   },
   { 
     id: "fortune_teller", 
@@ -148,7 +157,8 @@ export const roles: Role[] = [
     otherNightOrder: 9, 
     nightActionType: "inspect", 
     firstNightReminder: "查恶魔", 
-    otherNightReminder: "查恶魔" 
+    otherNightReminder: "查恶魔",
+    script: "暗流涌动", // 暗流涌动角色 
   },
   { 
     id: "undertaker", 
@@ -160,7 +170,8 @@ export const roles: Role[] = [
     firstNightOrder: 0, 
     otherNightOrder: 10, 
     nightActionType: "none", 
-    otherNightReminder: "查死人" 
+    otherNightReminder: "查死人",
+    script: "暗流涌动", // 暗流涌动角色 
   },
   { 
     id: "monk", 
@@ -172,7 +183,8 @@ export const roles: Role[] = [
     firstNightOrder: 0, 
     otherNightOrder: 2, 
     nightActionType: "protect", 
-    otherNightReminder: "保护" 
+    otherNightReminder: "保护",
+    script: "暗流涌动", // 暗流涌动角色 
   },
   { 
     id: "ravenkeeper", 
@@ -184,7 +196,8 @@ export const roles: Role[] = [
     firstNightOrder: 0, 
     otherNightOrder: 11, 
     nightActionType: "inspect_death", 
-    otherNightReminder: "若死查验" 
+    otherNightReminder: "若死查验",
+    script: "暗流涌动", // 暗流涌动角色 
   },
   { 
     id: "virgin", 
@@ -195,7 +208,8 @@ export const roles: Role[] = [
     otherNight: false, 
     firstNightOrder: 0, 
     otherNightOrder: 0, 
-    nightActionType: "none" 
+    nightActionType: "none",
+    script: "暗流涌动", // 暗流涌动角色 
   },
   { 
     id: "slayer", 
@@ -206,7 +220,8 @@ export const roles: Role[] = [
     otherNight: false, 
     firstNightOrder: 0, 
     otherNightOrder: 0, 
-    nightActionType: "none" 
+    nightActionType: "none",
+    script: "暗流涌动", // 暗流涌动角色 
   },
   { 
     id: "soldier", 
@@ -217,7 +232,8 @@ export const roles: Role[] = [
     otherNight: false, 
     firstNightOrder: 0, 
     otherNightOrder: 0, 
-    nightActionType: "none" 
+    nightActionType: "none",
+    script: "暗流涌动", // 暗流涌动角色 
   },
   { 
     id: "mayor", 
@@ -228,7 +244,8 @@ export const roles: Role[] = [
     otherNight: false, 
     firstNightOrder: 0, 
     otherNightOrder: 0, 
-    nightActionType: "none" 
+    nightActionType: "none",
+    script: "暗流涌动", // 暗流涌动角色 
   },
   
   // ========== 外来者 (Outsider) - 4个 ==========
@@ -243,7 +260,8 @@ export const roles: Role[] = [
     otherNightOrder: 12, 
     nightActionType: "mark", 
     firstNightReminder: "选主人", 
-    otherNightReminder: "选主人" 
+    otherNightReminder: "选主人",
+    script: "暗流涌动", // 暗流涌动角色 
   },
   { 
     id: "drunk", 
@@ -254,7 +272,8 @@ export const roles: Role[] = [
     otherNight: true, 
     firstNightOrder: 0, 
     otherNightOrder: 0, 
-    nightActionType: "none" 
+    nightActionType: "none",
+    script: "暗流涌动", // 暗流涌动角色 
   },
   { 
     id: "recluse", 
@@ -265,7 +284,8 @@ export const roles: Role[] = [
     otherNight: false, 
     firstNightOrder: 0, 
     otherNightOrder: 0, 
-    nightActionType: "none" 
+    nightActionType: "none",
+    script: "暗流涌动", // 暗流涌动角色 
   },
   { 
     id: "saint", 
@@ -276,7 +296,8 @@ export const roles: Role[] = [
     otherNight: false, 
     firstNightOrder: 0, 
     otherNightOrder: 0, 
-    nightActionType: "none" 
+    nightActionType: "none",
+    script: "暗流涌动", // 暗流涌动角色 
   },
   
   // ========== 爪牙 (Minion) - 4个 ==========
@@ -291,7 +312,8 @@ export const roles: Role[] = [
     otherNightOrder: 1, 
     nightActionType: "poison", 
     firstNightReminder: "投毒", 
-    otherNightReminder: "投毒" 
+    otherNightReminder: "投毒",
+    script: "暗流涌动", // 暗流涌动角色 
   },
   { 
     id: "spy", 
@@ -304,7 +326,8 @@ export const roles: Role[] = [
     otherNightOrder: 15, 
     nightActionType: "spy_info", 
     firstNightReminder: "看书", 
-    otherNightReminder: "看书" 
+    otherNightReminder: "看书",
+    script: "暗流涌动", // 暗流涌动角色 
   },
   { 
     id: "scarlet_woman", 
@@ -315,7 +338,8 @@ export const roles: Role[] = [
     otherNight: true, 
     firstNightOrder: 0, 
     otherNightOrder: 0, 
-    nightActionType: "none" 
+    nightActionType: "none",
+    script: "暗流涌动", // 暗流涌动角色 
   },
   { 
     id: "baron", 
@@ -326,7 +350,8 @@ export const roles: Role[] = [
     otherNight: false, 
     firstNightOrder: 0, 
     otherNightOrder: 0, 
-    nightActionType: "none" 
+    nightActionType: "none",
+    script: "暗流涌动", // 暗流涌动角色 
   },
   
   // ========== 恶魔 (Demon) - 1个 ==========
@@ -341,7 +366,8 @@ export const roles: Role[] = [
     otherNightOrder: 3, 
     nightActionType: "kill", 
     firstNightReminder: "认队友", 
-    otherNightReminder: "杀人" 
+    otherNightReminder: "杀人",
+    script: "暗流涌动", // 暗流涌动角色 
   }
 ];
 

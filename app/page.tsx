@@ -599,6 +599,7 @@ export default function Home() {
   const [currentWakeIndex, setCurrentWakeIndex] = useState(0);
   const [selectedActionTargets, setSelectedActionTargets] = useState<number[]>([]);
   const [inspectionResult, setInspectionResult] = useState<string | null>(null);
+  const [inspectionResultKey, setInspectionResultKey] = useState(0); // 占卜师结果刷新用，强制重新渲染结果弹窗
   const [currentHint, setCurrentHint] = useState<NightHintState>({ isPoisoned: false, guide: "", speak: "" });
   
   // 保存每个角色的 hint 信息，用于"上一步"时恢复（不重新生成）
@@ -1206,29 +1207,39 @@ export default function Home() {
       }
     }
     
-    if(nightInfo.effectiveRole.nightActionType === 'inspect' && newT.length === 2) {
-      if (currentHint.isPoisoned && currentHint.fakeInspectionResult) {
-        setInspectionResult(currentHint.fakeInspectionResult);
+    if(nightInfo.effectiveRole.nightActionType === 'inspect') {
+      if (newT.length === 2) {
+        // 每次选中两人时，实时重新计算结果，并刷新弹窗动画
+        let resultText: string;
+        if (currentHint.isPoisoned && currentHint.fakeInspectionResult) {
+          resultText = currentHint.fakeInspectionResult;
+        } else {
+          // 占卜师判断逻辑：查验2人，若有恶魔/红罗刹则显示"是"，其他显示"否"
+          const hasEvil = newT.some(tid => { 
+            const t = seats.find(x=>x.id===tid); 
+            if (!t || !t.role) return false;
+            // 检查是否是恶魔
+            const isDemon = t.role.type === 'demon' || t.isDemonSuccessor;
+            // 检查是否是红罗刹（兼容旧数据：既看 isRedHerring 标记，也看状态文字中是否含“红罗刹”）
+            const isRedHerring = t.isRedHerring === true || (t.statusDetails || []).includes("红罗刹");
+            return isDemon || isRedHerring;
+          });
+          resultText = hasEvil ? "✅ 是" : "❌ 否";
+        }
+        setInspectionResult(resultText);
+        setInspectionResultKey(k => k + 1); // 触发结果弹窗重新挂载，产生“重新浮现”效果
+
+        if (nightInfo) {
+          // 行动日志去重：占卜师每次选择都更新日志，只保留最后一次
+          addLogWithDeduplication(
+            `${nightInfo.seat.id+1}号(占卜师) 查验 ${newT.map(t=>t+1).join('号、')}号 -> ${resultText}`,
+            nightInfo.seat.id,
+            '占卜师'
+          );
+        }
       } else {
-        // 占卜师判断逻辑：查验2人，若有恶魔/红罗刹则显示"是"，其他显示"否"
-        const hasEvil = newT.some(tid => { 
-          const t = seats.find(x=>x.id===tid); 
-          if (!t || !t.role) return false;
-          // 检查是否是恶魔
-          const isDemon = t.role.type === 'demon' || t.isDemonSuccessor;
-          // 检查是否是红罗刹
-          const isRedHerring = t.isRedHerring === true;
-          return isDemon || isRedHerring;
-        });
-        setInspectionResult(hasEvil ? "✅ 是" : "❌ 否");
-      }
-      if (nightInfo) {
-        // 行动日志去重：占卜师每次选择都更新日志，只保留最后一次
-        addLogWithDeduplication(
-          `${nightInfo.seat.id+1}号(占卜师) 查验 ${newT.map(t=>t+1).join('号、')}号 -> ${inspectionResult || (currentHint.isPoisoned && currentHint.fakeInspectionResult ? currentHint.fakeInspectionResult : '')}`,
-          nightInfo.seat.id,
-          '占卜师'
-        );
+        // 目标数不足 2 时，清空当前显示结果，等待重新选择
+        setInspectionResult(null);
       }
     }
     
@@ -1752,13 +1763,36 @@ export default function Home() {
   const toggleStatus = (type: string) => {
     if(!contextMenu) return;
     setSeats(p => {
-      const updated = p.map(s => s.id === contextMenu.seatId ? {
-        ...s,
-        isDead: type === 'dead' ? !s.isDead : s.isDead,
-        isPoisoned: type === 'poison' ? !s.isPoisoned : s.isPoisoned,
-        isDrunk: type === 'drunk' ? !s.isDrunk : s.isDrunk,
-        isRedHerring: type === 'redherring' ? !s.isRedHerring : s.isRedHerring
-      } : s);
+      let updated;
+      if (type === 'redherring') {
+        // 场上“红罗刹”唯一：选择新的红罗刹时，清除其他玩家的红罗刹标记和图标
+        updated = p.map(s => {
+          if (s.id === contextMenu.seatId) {
+            const details = s.statusDetails || [];
+            return {
+              ...s,
+              isRedHerring: true,
+              statusDetails: details.includes("红罗刹")
+                ? details
+                : [...details, "红罗刹"],
+            };
+          } else {
+            const details = s.statusDetails || [];
+            return {
+              ...s,
+              isRedHerring: false,
+              statusDetails: details.filter(d => d !== "红罗刹"),
+            };
+          }
+        });
+      } else {
+        updated = p.map(s => s.id === contextMenu.seatId ? {
+          ...s,
+          isDead: type === 'dead' ? !s.isDead : s.isDead,
+          isPoisoned: type === 'poison' ? !s.isPoisoned : s.isPoisoned,
+          isDrunk: type === 'drunk' ? !s.isDrunk : s.isDrunk,
+        } : s);
+      }
       // 8. 恶魔可以死在任意环节，当被标记死亡后，游戏立即结束
       if (type === 'dead') {
         // 立即检查游戏结束条件（包括存活人数和恶魔死亡）
@@ -2264,7 +2298,10 @@ export default function Home() {
               )}
               
               {inspectionResult && (
-                <div className="bg-blue-600 p-4 rounded-xl text-center font-bold text-2xl shadow-2xl mt-4 animate-bounce">
+                <div
+                  key={inspectionResultKey}
+                  className="bg-blue-600 p-4 rounded-xl text-center font-bold text-2xl shadow-2xl mt-4 animate-bounce"
+                >
                   {inspectionResult}
                 </div>
               )}
@@ -2835,6 +2872,20 @@ export default function Home() {
           >
             💀 切换死亡
           </button>
+          {/* 在核对身份阶段，允许选择红罗刹（仅限善良阵营），爪牙和恶魔为灰色不可选 */}
+          {gamePhase === 'check' && targetSeat.role && (
+            <button
+              onClick={()=>!['minion','demon'].includes(targetSeat.role!.type) && toggleStatus('redherring')}
+              disabled={['minion','demon'].includes(targetSeat.role.type)}
+              className={`block w-full text-left px-6 py-3 text-lg font-medium border-t border-gray-700 whitespace-nowrap ${
+                ['minion','demon'].includes(targetSeat.role.type)
+                  ? 'text-gray-500 cursor-not-allowed bg-gray-800'
+                  : 'hover:bg-red-900 text-red-300'
+              }`}
+            >
+              🎭 选为红罗刹
+            </button>
+          )}
         </div>
         );
       })()}

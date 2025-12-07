@@ -1357,7 +1357,7 @@ export default function Home() {
               withRed[t.id] = { 
                 ...withRed[t.id], 
                 isRedHerring: true, 
-                statusDetails: [...withRed[t.id].statusDetails, "红罗刹"] 
+                statusDetails: [...(withRed[t.id].statusDetails || []), "红罗刹"] 
               };
             }
         }
@@ -1383,7 +1383,7 @@ export default function Home() {
               withRed[t.id] = { 
                 ...withRed[t.id], 
                 isRedHerring: true, 
-                statusDetails: [...withRed[t.id].statusDetails, "红罗刹"] 
+                statusDetails: [...(withRed[t.id].statusDetails || []), "红罗刹"] 
               };
             }
         }

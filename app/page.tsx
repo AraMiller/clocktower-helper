@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useMemo, useCallback } from "react";
-import { roles, Role, Seat, LogEntry, GamePhase, WinResult, groupedRoles, typeLabels, typeColors, typeBgColors } from "./data";
+import { roles, Role, Seat, LogEntry, GamePhase, WinResult, groupedRoles, typeLabels, typeColors, typeBgColors, RoleType, scripts, Script } from "./data";
 
 // --- 辅助类型 ---
 interface NightHintState { 
@@ -21,6 +21,19 @@ interface NightInfoResult {
   guide: string;
   speak: string;
   action: string;
+}
+
+// 对局记录数据结构
+interface GameRecord {
+  id: string; // 唯一ID
+  scriptName: string; // 剧本名称
+  startTime: string; // 游戏开始时间
+  endTime: string; // 游戏结束时间
+  duration: number; // 游戏总时长（秒）
+  winResult: WinResult; // 游戏结果
+  winReason: string | null; // 胜利原因
+  seats: Seat[]; // 座位信息（游戏结束时的状态）
+  gameLogs: LogEntry[]; // 游戏日志
 }
 
 const phaseNames: Record<string, string> = {
@@ -103,21 +116,28 @@ const shouldShowFakeInfo = (
 
 // --- 核心计算逻辑 ---
 const calculateNightInfo = (
+  selectedScript: Script | null,
   seats: Seat[], 
   currentSeatId: number, 
   gamePhase: GamePhase,
   lastDuskExecution: number | null,
   fakeInspectionResult?: string,
-  drunkFirstInfoMap?: Map<number, boolean>
+  drunkFirstInfoMap?: Map<number, boolean>,
+  isEvilWithJudgmentFn?: (seat: Seat) => boolean,
+  poppyGrowerDead?: boolean
 ): NightInfoResult | null => {
+  // 使用传入的判定函数，如果没有则使用默认的isEvil
+  const checkEvil = isEvilWithJudgmentFn || isEvil;
   const targetSeat = seats.find(s => s.id === currentSeatId);
   if (!targetSeat || !targetSeat.role) return null;
 
   const effectiveRole = targetSeat.role.id === "drunk" ? targetSeat.charadeRole : targetSeat.role;
   if (!effectiveRole) return null;
 
-  const isPoisoned = targetSeat.isPoisoned || targetSeat.isDrunk || targetSeat.role.id === "drunk";
-  const reason = targetSeat.isPoisoned ? "中毒" : targetSeat.isDrunk ? "酒鬼" : "";
+  // 检查是否中毒：包括普通中毒、永久中毒（舞蛇人制造）、酒鬼状态
+  const hasPermanentPoison = targetSeat.statusDetails?.includes('永久中毒') || false;
+  const isPoisoned = targetSeat.isPoisoned || hasPermanentPoison || targetSeat.isDrunk || targetSeat.role.id === "drunk";
+  const reason = hasPermanentPoison ? "永久中毒" : targetSeat.isPoisoned ? "中毒" : targetSeat.isDrunk ? "酒鬼" : "";
   
   // 判断是否应该显示假信息
   const fakeInfoCheck = drunkFirstInfoMap 
@@ -129,11 +149,21 @@ const calculateNightInfo = (
 
   if (effectiveRole.id === 'imp') {
     if (gamePhase === 'firstNight') {
-      const minions = seats.filter(s => s.role?.type === 'minion').map(s => `${s.id+1}号`);
-      guide = `👿 爪牙列表：${minions.length > 0 ? minions.join(', ') : '无'}。`;
-      // 8. 台词融入指引内容
-      speak = `"${minions.length > 0 ? `你的爪牙是 ${minions.join('、')}。` : '场上没有爪牙。'}请确认你的爪牙。"`;
-      action = "展示爪牙";
+      // 检查罂粟种植者状态：如果罂粟种植者在场且存活，恶魔不知道爪牙是谁
+      const poppyGrower = seats.find(s => s.role?.id === 'poppy_grower');
+      const shouldHideMinions = poppyGrower && !poppyGrower.isDead && poppyGrowerDead === false;
+      
+      if (shouldHideMinions) {
+        guide = `🌺 罂粟种植者在场，你不知道你的爪牙是谁。`;
+        speak = `"罂粟种植者在场，你不知道你的爪牙是谁。"`;
+        action = "无信息";
+      } else {
+        const minions = seats.filter(s => s.role?.type === 'minion').map(s => `${s.id+1}号`);
+        guide = `👿 爪牙列表：${minions.length > 0 ? minions.join(', ') : '无'}。`;
+        // 8. 台词融入指引内容
+        speak = `"${minions.length > 0 ? `你的爪牙是 ${minions.join('、')}。` : '场上没有爪牙。'}请确认你的爪牙。"`;
+        action = "展示爪牙";
+      }
     } else {
       guide = "👉 让小恶魔选人杀害。";
       // 8. 台词融入指引内容
@@ -333,8 +363,18 @@ const calculateNightInfo = (
           // 中毒/酒鬼时：指引处先展示正确信息，然后生成错误的干扰信息
           // 确保错误信息一定为假：选择的角色和座位号必须不匹配
           
-          // 1. 获取所有可能的外来者角色列表
-          const outsiderRoles = roles.filter(r => r.type === 'outsider' && r.id !== effectiveRole.id);
+          // 1. 获取所有可能的外来者角色列表（根据当前剧本过滤）
+          const allOutsiderRoles = roles.filter(r => r.type === 'outsider' && r.id !== effectiveRole.id);
+          const outsiderRoles = selectedScript 
+            ? allOutsiderRoles.filter(r => 
+                !r.script || 
+                r.script === selectedScript.name ||
+                (selectedScript.id === 'trouble_brewing' && !r.script) ||
+                (selectedScript.id === 'bad_moon_rising' && (!r.script || r.script === '暗月初升')) ||
+                (selectedScript.id === 'sects_and_violets' && (!r.script || r.script === '梦陨春宵')) ||
+                (selectedScript.id === 'midnight_revelry' && (!r.script || r.script === '夜半狂欢'))
+              )
+            : allOutsiderRoles;
           
           // 2. 随机选择一个外来者角色作为错误信息中的角色
           const otherRoles = outsiderRoles.filter(r => r.id !== realRole.id);
@@ -430,11 +470,21 @@ const calculateNightInfo = (
           // 中毒/酒鬼时：指引处先展示正确信息，然后生成错误的干扰信息
           // 确保错误信息一定为假：选择的角色和座位号必须不匹配
           
-          // 1. 随机选择一个爪牙角色作为错误信息中的角色
+          // 1. 随机选择一个爪牙角色作为错误信息中的角色（根据当前剧本过滤）
           const allMinionRoles = roles.filter(r => r.type === 'minion' && r.id !== effectiveRole.id);
-          const wrongRole = allMinionRoles.filter(r => r.id !== realRole.id).length > 0 
-            ? getRandom(allMinionRoles.filter(r => r.id !== realRole.id))
-            : getRandom(allMinionRoles);
+          const filteredMinionRoles = selectedScript 
+            ? allMinionRoles.filter(r => 
+                !r.script || 
+                r.script === selectedScript.name ||
+                (selectedScript.id === 'trouble_brewing' && !r.script) ||
+                (selectedScript.id === 'bad_moon_rising' && (!r.script || r.script === '暗月初升')) ||
+                (selectedScript.id === 'sects_and_violets' && (!r.script || r.script === '梦陨春宵')) ||
+                (selectedScript.id === 'midnight_revelry' && (!r.script || r.script === '夜半狂欢'))
+              )
+            : allMinionRoles;
+          const wrongRole: Role = filteredMinionRoles.filter(r => r.id !== realRole.id).length > 0 
+            ? getRandom(filteredMinionRoles.filter(r => r.id !== realRole.id))
+            : getRandom(filteredMinionRoles);
           
           // 2. 选择错误的座位号：只从善良玩家中选择（避开所有邪恶阵营玩家）
           // 同时确保这些座位号上的角色都不是错误信息中的角色
@@ -550,10 +600,218 @@ const calculateNightInfo = (
       speak = '"请选择一名玩家。"'; 
     }
     action = "查验";
+  } 
+  // ========== 夜半狂欢角色处理 ==========
+  else if (effectiveRole.id === 'professor_mr' && gamePhase !== 'firstNight') {
+    // 教授：每局游戏一次，选择一名死亡的玩家，该玩家复活
+    guide = "🔬 每局游戏一次，选择一名死亡的玩家复活。"; 
+    speak = '"请选择一名死亡的玩家。如果他是镇民，该玩家复活。"'; 
+    action = "none";
+  } else if (effectiveRole.id === 'snake_charmer_mr') {
+    // 舞蛇人：每晚选择一名存活的玩家，如果选中了恶魔，交换角色和阵营
+    guide = "🐍 选择一名存活的玩家，如果选中了恶魔，你和他交换角色和阵营，然后他中毒。"; 
+    speak = '"请选择一名存活的玩家。如果你选中了恶魔，你和他交换角色和阵营，然后他中毒。"'; 
+    action = "mark";
+  } else if (effectiveRole.id === 'savant_mr') {
+    // 博学者：每个白天可以私下询问说书人两条信息（一真一假）
+    guide = "📚 每个白天，你可以私下询问说书人以得知两条信息：一个是正确的，一个是错误的。"; 
+    speak = '"每个白天，你可以私下询问说书人以得知两条信息：一个是正确的，一个是错误的。"'; 
+        action = "告知";
+  } else if (effectiveRole.id === 'noble' && gamePhase === 'firstNight') {
+    // 贵族：首夜得知三名玩家，其中恰好有一名是邪恶的
+    const allPlayers = seats.filter(s => s.id !== currentSeatId && s.role);
+    if (allPlayers.length >= 3) {
+      const evilPlayers = allPlayers.filter(s => checkEvil(s));
+      const goodPlayers = allPlayers.filter(s => !checkEvil(s));
+      
+      let selectedPlayers: Seat[] = [];
+      if (evilPlayers.length > 0 && goodPlayers.length >= 2) {
+        // 选择1个邪恶玩家和2个善良玩家
+        const evil = getRandom(evilPlayers);
+        const good1 = getRandom(goodPlayers);
+        const good2 = getRandom(goodPlayers.filter(p => p.id !== good1.id));
+        selectedPlayers = [evil, good1, good2].sort(() => Math.random() - 0.5);
+      } else {
+        // 如果邪恶玩家不足或善良玩家不足，随机选择3个
+        selectedPlayers = [...allPlayers].sort(() => Math.random() - 0.5).slice(0, 3);
+      }
+          
+          if (shouldShowFake) {
+        // 中毒/酒鬼时：生成错误的信息
+        const wrongPlayers = seats.filter(s => 
+          s.id !== currentSeatId && 
+          !selectedPlayers.some(p => p.id === s.id) &&
+          s.role
+        );
+        const fakePlayers = wrongPlayers.length >= 3 
+          ? [...wrongPlayers].sort(() => Math.random() - 0.5).slice(0, 3)
+          : selectedPlayers;
+        guide = `⚠️ [异常] 真实信息：${selectedPlayers.map(p => `${p.id+1}号`).join('、')}，其中恰好有一名是邪恶的\n请展示错误信息：${fakePlayers.map(p => `${p.id+1}号`).join('、')}`;
+        speak = `"你得知 ${fakePlayers.map(p => `${p.id+1}号`).join('、')}。其中恰好有一名是邪恶的。"`;
+          } else {
+        guide = `👀 真实信息: ${selectedPlayers.map(p => `${p.id+1}号`).join('、')}，其中恰好有一名是邪恶的`;
+        speak = `"你得知 ${selectedPlayers.map(p => `${p.id+1}号`).join('、')}。其中恰好有一名是邪恶的。"`;
+          }
+          action = "展示";
+      } else {
+      guide = "玩家不足。"; 
+      speak = '"场上玩家不足。"'; 
+        action = "展示";
+      }
+  } else if (effectiveRole.id === 'balloonist') {
+    // 气球驾驶员：每晚得知一名不同角色类型的玩家，直到你得知了场上所有角色类型
+    // 这里需要记录已经得知的角色类型
+    guide = "🎈 选择一名玩家，你会得知他的角色类型。"; 
+    speak = '"请选择一名玩家。你会得知他的角色类型。"'; 
+    action = "inspect";
+  } else if (effectiveRole.id === 'amnesiac') {
+    // 失意者：每个白天可以询问说书人一次猜测
+    guide = "🧠 每个白天，你可以询问说书人一次猜测，你会得知你的猜测有多准确。"; 
+    speak = '"每个白天，你可以询问说书人一次猜测，你会得知你的猜测有多准确。"'; 
+    action = "告知";
+  } else if (effectiveRole.id === 'engineer') {
+    // 工程师：每局游戏一次，可以选择让恶魔变成你选择的一个恶魔角色，或让所有爪牙变成你选择的爪牙角色
+    guide = "🔧 每局游戏一次，选择让恶魔变成你选择的一个恶魔角色，或让所有爪牙变成你选择的爪牙角色。"; 
+    speak = '"每局游戏一次，请选择让恶魔变成你选择的一个恶魔角色，或让所有爪牙变成你选择的爪牙角色。"'; 
+    action = "mark";
+  } else if (effectiveRole.id === 'fisherman') {
+    // 渔夫：每局游戏一次，在白天时可以询问说书人一些建议
+    guide = "🎣 每局游戏一次，在白天时，你可以询问说书人一些建议来帮助你的团队获胜。"; 
+    speak = '"每局游戏一次，在白天时，你可以询问说书人一些建议来帮助你的团队获胜。"'; 
+    action = "告知";
+  } else if (effectiveRole.id === 'ranger') {
+    // 巡山人：每局游戏一次，选择一名存活的玩家，如果选中了落难少女，她会变成一个不在场的镇民角色
+    guide = "🏔️ 每局游戏一次，选择一名存活的玩家，如果选中了落难少女，她会变成一个不在场的镇民角色。"; 
+    speak = '"请选择一名存活的玩家。如果选中了落难少女，她会变成一个不在场的镇民角色。"'; 
+    action = "mark";
+  } else if (effectiveRole.id === 'farmer') {
+    // 农夫：如果你在夜晚死亡，一名存活的善良玩家会变成农夫
+    guide = "🌾 如果你在夜晚死亡，一名存活的善良玩家会变成农夫。"; 
+    speak = '"如果你在夜晚死亡，一名存活的善良玩家会变成农夫。"'; 
+    action = "告知";
+  } else if (effectiveRole.id === 'poppy_grower') {
+    // 罂粟种植者：爪牙和恶魔不知道彼此。如果你死亡，他们会在当晚得知彼此
+    guide = "🌺 爪牙和恶魔不知道彼此。如果你死亡，他们会在当晚得知彼此。"; 
+    speak = '"爪牙和恶魔不知道彼此。如果你死亡，他们会在当晚得知彼此。"'; 
+    action = "告知";
+  } else if (effectiveRole.id === 'atheist') {
+    // 无神论者：说书人可以打破游戏规则。如果说书人被处决，好人阵营获胜
+    guide = "🚫 说书人可以打破游戏规则。如果说书人被处决，好人阵营获胜，即使你已死亡。"; 
+    speak = '"说书人可以打破游戏规则。如果说书人被处决，好人阵营获胜，即使你已死亡。"'; 
+    action = "告知";
+  } else if (effectiveRole.id === 'cannibal') {
+    // 食人族：你拥有最后被处决的玩家的能力。如果该玩家是邪恶的，你会中毒直到下一个善良玩家被处决
+    guide = "🍖 你拥有最后被处决的玩家的能力。如果该玩家是邪恶的，你会中毒直到下一个善良玩家被处决。"; 
+    speak = '"你拥有最后被处决的玩家的能力。如果该玩家是邪恶的，你会中毒直到下一个善良玩家被处决。"'; 
+    action = "告知";
+  } else if (effectiveRole.id === 'drunk_mr') {
+    // 酒鬼：不知道自己是酒鬼，以为自己是镇民
+    guide = "🍺 你不知道你是酒鬼。你以为你是一个镇民角色，但其实你不是。"; 
+    speak = '"你不知道你是酒鬼。你以为你是一个镇民角色，但其实你不是。"'; 
+    action = "告知";
+  } else if (effectiveRole.id === 'barber_mr') {
+    // 理发师：如果你死亡，在当晚恶魔可以选择两名玩家交换角色
+    guide = "💇 如果你死亡，在当晚恶魔可以选择两名玩家(不能选择其他恶魔)交换角色。"; 
+    speak = '"如果你死亡，在当晚恶魔可以选择两名玩家(不能选择其他恶魔)交换角色。"'; 
+    action = "告知";
+  } else if (effectiveRole.id === 'damsel' && gamePhase === 'firstNight') {
+    // 落难少女：所有爪牙都知道落难少女在场
+    guide = "👸 所有爪牙都知道落难少女在场。"; 
+    speak = '"所有爪牙都知道落难少女在场。"'; 
+    action = "告知";
+  } else if (effectiveRole.id === 'golem') {
+    // 魔像：每局游戏一次，只能发起一次提名。如果提名的玩家不是恶魔，他死亡
+    guide = "🗿 每局游戏一次，你只能发起一次提名。当你发起提名时，如果你提名的玩家不是恶魔，他死亡。"; 
+    speak = '"每局游戏一次，你只能发起一次提名。当你发起提名时，如果你提名的玩家不是恶魔，他死亡。"'; 
+      action = "告知";
+  } else if (effectiveRole.id === 'poisoner_mr') {
+    // 投毒者：每晚选择一名玩家，他当晚和明天白天中毒
+    guide = "🧪 选择一名玩家：他当晚和明天白天中毒。"; 
+    speak = '"请选择一名玩家。他当晚和明天白天中毒。"'; 
+    action = "poison";
+  } else if (effectiveRole.id === 'pit_hag_mr') {
+    // 麻脸巫婆：每晚选择一名玩家和一个角色，如果该角色不在场，他变成该角色
+    guide = "🧹 选择一名玩家和一个角色，如果该角色不在场，他变成该角色。如果因此创造了一个恶魔，当晚的死亡由说书人决定。"; 
+    speak = '"请选择一名玩家和一个角色。如果该角色不在场，他变成该角色。如果因此创造了一个恶魔，当晚的死亡由说书人决定。"'; 
+    action = "mark";
+  } else if (effectiveRole.id === 'lunatic_mr') {
+    // 精神病患者：每个白天，在提名开始前，可以公开选择一名玩家死亡
+    guide = "🔪 每个白天，在提名开始前，你可以公开选择一名玩家：他死亡。如果你被处决，提名你的玩家必须和你玩石头剪刀布；只有你输了才会死亡。"; 
+    speak = '"每个白天，在提名开始前，你可以公开选择一名玩家。他死亡。如果你被处决，提名你的玩家必须和你玩石头剪刀布；只有你输了才会死亡。"'; 
+    action = "告知";
+  } else if (effectiveRole.id === 'shaman' && gamePhase === 'firstNight') {
+    // 灵言师：首夜得知一个关键词
+    const keywords = ['月亮', '星星', '太阳', '海洋', '山峰', '森林', '河流', '火焰', '风暴', '彩虹'];
+    const keyword = getRandom(keywords);
+    guide = `🔮 真实信息: 关键词是【${keyword}】。第一个公开说出这个关键词的善良玩家会在当晚变成邪恶。`; 
+    speak = `"你的关键词是【${keyword}】。第一个公开说出这个关键词的善良玩家会在当晚变成邪恶。"`; 
+    action = "告知";
+  } else if (effectiveRole.id === 'vigormortis_mr') {
+    // 亡骨魔：每晚选择一名玩家，他死亡。被你杀死的爪牙保留他的能力，且与他邻近的两名镇民之一中毒
+    if (gamePhase === 'firstNight') {
+      // 检查罂粟种植者状态：如果罂粟种植者在场且存活，恶魔不知道爪牙是谁
+      const poppyGrower = seats.find(s => s.role?.id === 'poppy_grower');
+      const shouldHideMinions = poppyGrower && !poppyGrower.isDead && poppyGrowerDead === false;
+      
+      if (shouldHideMinions) {
+        guide = `🌺 罂粟种植者在场，你不知道你的爪牙是谁。`;
+        speak = `"罂粟种植者在场，你不知道你的爪牙是谁。"`;
+        action = "无信息";
+      } else {
+        const minions = seats.filter(s => s.role?.type === 'minion' && s.id !== currentSeatId).map(s => `${s.id+1}号`);
+        guide = `👿 爪牙列表：${minions.length > 0 ? minions.join(', ') : '无'}。`;
+        speak = `"${minions.length > 0 ? `你的爪牙是 ${minions.join('、')}。` : '场上没有爪牙。'}请确认你的爪牙。"`;
+        action = "展示";
+      }
+    } else {
+        guide = "⚔️ 选择一名玩家：他死亡。被你杀死的爪牙保留他的能力，且与他邻近的两名镇民之一中毒。"; 
+        speak = '"请选择一名玩家。他死亡。被你杀死的爪牙保留他的能力，且与他邻近的两名镇民之一中毒。"'; 
+        action = "kill";
+    }
+  } else if (effectiveRole.id === 'hadesia') {
+    // 哈迪寂亚：每晚选择三名玩家（所有玩家都会得知你选择了谁），他们秘密决定自己的命运，如果他们全部存活，他们全部死亡
+    if (gamePhase === 'firstNight') {
+      // 检查罂粟种植者状态：如果罂粟种植者在场且存活，恶魔不知道爪牙是谁
+      const poppyGrower = seats.find(s => s.role?.id === 'poppy_grower');
+      const shouldHideMinions = poppyGrower && !poppyGrower.isDead && poppyGrowerDead === false;
+      
+      if (shouldHideMinions) {
+        guide = `🌺 罂粟种植者在场，你不知道你的爪牙是谁。`;
+        speak = `"罂粟种植者在场，你不知道你的爪牙是谁。"`;
+        action = "无信息";
+      } else {
+        const minions = seats.filter(s => s.role?.type === 'minion' && s.id !== currentSeatId).map(s => `${s.id+1}号`);
+        guide = `👿 爪牙列表：${minions.length > 0 ? minions.join(', ') : '无'}。`; 
+        speak = `"${minions.length > 0 ? `你的爪牙是 ${minions.join('、')}。` : '场上没有爪牙。'}请确认你的爪牙。"`; 
+        action = "展示";
+      }
+    } else {
+      guide = "⚔️ 选择三名玩家（所有玩家都会得知你选择了谁）：他们秘密决定自己的命运，如果他们全部存活，他们全部死亡。"; 
+      speak = '"请选择三名玩家。所有玩家都会得知你选择了谁。他们秘密决定自己的命运，如果他们全部存活，他们全部死亡。"'; 
+        action = "kill";
+    }
+  } else if (effectiveRole.type === 'minion' && gamePhase === 'firstNight') {
+    // 爪牙首夜：被告知恶魔是谁（除非罂粟种植者在场且存活）
+    const poppyGrower = seats.find(s => s.role?.id === 'poppy_grower');
+    const shouldHideDemon = poppyGrower && !poppyGrower.isDead && poppyGrowerDead === false;
+    
+    if (shouldHideDemon) {
+      guide = `🌺 罂粟种植者在场，你不知道恶魔是谁。`;
+      speak = `"罂粟种植者在场，你不知道恶魔是谁。"`;
+      action = "无信息";
+    } else {
+      // 找到恶魔（包括小恶魔继任者）
+      const demons = seats.filter(s => 
+        (s.role?.type === 'demon' || s.isDemonSuccessor) && s.id !== currentSeatId
+      ).map(s => `${s.id+1}号`);
+      guide = `👿 恶魔列表：${demons.length > 0 ? demons.join(', ') : '无'}。`;
+      speak = `"${demons.length > 0 ? `恶魔是 ${demons.join('、')}。` : '场上没有恶魔。'}请确认恶魔。"`;
+      action = "展示恶魔";
+    }
   } else {
     guide = "💤 无行动。"; 
     speak = "（无）"; 
-    action="跳过";
+    action = "跳过";
   }
   
   // 修复：首晚小恶魔没有技能，将 nightActionType 设置为 'none'
@@ -580,7 +838,8 @@ export default function Home() {
   const [seats, setSeats] = useState<Seat[]>([]);
   const [initialSeats, setInitialSeats] = useState<Seat[]>([]);
   
-  const [gamePhase, setGamePhase] = useState<GamePhase>("setup");
+  const [gamePhase, setGamePhase] = useState<GamePhase>("scriptSelection");
+  const [selectedScript, setSelectedScript] = useState<Script | null>(null);
   const [nightCount, setNightCount] = useState(1);
   const [deadThisNight, setDeadThisNight] = useState<number[]>([]); // 改为存储玩家ID
   const [executedPlayerId, setExecutedPlayerId] = useState<number | null>(null);
@@ -594,6 +853,7 @@ export default function Home() {
   const [selectedRole, setSelectedRole] = useState<Role | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; seatId: number } | null>(null);
   const [showMenu, setShowMenu] = useState(false);
+  const [longPressingSeats, setLongPressingSeats] = useState<Set<number>>(new Set()); // 正在长按的座位
   
   const [wakeQueueIds, setWakeQueueIds] = useState<number[]>([]);
   const [currentWakeIndex, setCurrentWakeIndex] = useState(0);
@@ -620,6 +880,8 @@ export default function Home() {
   const [voteInputValue, setVoteInputValue] = useState<string>('');
   const [showVoteErrorToast, setShowVoteErrorToast] = useState(false);
   const [showReviewModal, setShowReviewModal] = useState(false);
+  const [showGameRecordsModal, setShowGameRecordsModal] = useState(false);
+  const [gameRecords, setGameRecords] = useState<GameRecord[]>([]);
   const [showRoleInfoModal, setShowRoleInfoModal] = useState(false);
   const [showExecutionResultModal, setShowExecutionResultModal] = useState<{message: string, isVirginTrigger?: boolean} | null>(null);
   const [showShootResultModal, setShowShootResultModal] = useState<{message: string, isDemonDead: boolean} | null>(null);
@@ -627,10 +889,41 @@ export default function Home() {
   const [showPoisonConfirmModal, setShowPoisonConfirmModal] = useState<number | null>(null); // 投毒者确认下毒
   const [showPoisonEvilConfirmModal, setShowPoisonEvilConfirmModal] = useState<number | null>(null); // 投毒者确认对邪恶玩家下毒
   const [showNightDeathReportModal, setShowNightDeathReportModal] = useState<string | null>(null); // 夜晚死亡报告
+  const [showHadesiaKillConfirmModal, setShowHadesiaKillConfirmModal] = useState<number[] | null>(null); // 哈迪寂亚确认杀死3名玩家
+  const [showRestartConfirmModal, setShowRestartConfirmModal] = useState<boolean>(false); // 重开确认弹窗
+  const [poppyGrowerDead, setPoppyGrowerDead] = useState(false); // 罂粟种植者是否已死亡
+  const [lastExecutedPlayerId, setLastExecutedPlayerId] = useState<number | null>(null); // 最后被处决的玩家ID（用于食人族）
+  const [damselGuessed, setDamselGuessed] = useState(false); // 落难少女是否已被猜测
+  const [shamanKeyword, setShamanKeyword] = useState<string | null>(null); // 灵言师的关键词
 
   const seatsRef = useRef(seats);
   const fakeInspectionResultRef = useRef<string | null>(null);
   const consoleContentRef = useRef<HTMLDivElement>(null);
+  const longPressTimerRef = useRef<Map<number, NodeJS.Timeout>>(new Map()); // 存储每个座位的长按定时器
+
+  // 根据selectedScript过滤角色的辅助函数
+  const getFilteredRoles = useCallback((roleList: Role[]): Role[] => {
+    if (!selectedScript) return [];
+    return roleList.filter(r => 
+      !r.script || 
+      r.script === selectedScript.name ||
+      (selectedScript.id === 'trouble_brewing' && !r.script) ||
+      (selectedScript.id === 'bad_moon_rising' && (!r.script || r.script === '暗月初升')) ||
+      (selectedScript.id === 'sects_and_violets' && (!r.script || r.script === '梦陨春宵')) ||
+      (selectedScript.id === 'midnight_revelry' && (!r.script || r.script === '夜半狂欢'))
+    );
+  }, [selectedScript]);
+
+  // 根据selectedScript过滤后的groupedRoles
+  const filteredGroupedRoles = useMemo(() => {
+    if (!selectedScript) return {} as Record<string, Role[]>;
+    const filtered = getFilteredRoles(roles);
+    return filtered.reduce((acc, role) => {
+      if (!acc[role.type]) acc[role.type] = [];
+      acc[role.type].push(role);
+      return acc;
+    }, {} as Record<string, Role[]>);
+  }, [selectedScript, getFilteredRoles]);
   const introTimeoutRef = useRef<any>(null);
   
   // 历史记录用于"上一步"功能
@@ -644,6 +937,7 @@ export default function Home() {
     selectedActionTargets: number[];
     gameLogs: LogEntry[];
     currentHint?: NightHintState; // 保存 hint 信息
+    selectedScript: Script | null; // 保存选中的剧本
   }>>([]);
   
   // 提名记录：记录谁提名了谁
@@ -666,7 +960,8 @@ export default function Home() {
     wakeQueueIds,
     currentWakeIndex,
     selectedActionTargets,
-    gameLogs
+    gameLogs,
+    selectedScript
   });
   
   const triggerIntroLoading = useCallback(() => {
@@ -690,13 +985,46 @@ export default function Home() {
       wakeQueueIds,
       currentWakeIndex,
       selectedActionTargets,
-      gameLogs
+      gameLogs,
+      selectedScript
     };
-  }, [seats, gamePhase, nightCount, executedPlayerId, wakeQueueIds, currentWakeIndex, selectedActionTargets, gameLogs]);
+  }, [seats, gamePhase, nightCount, executedPlayerId, wakeQueueIds, currentWakeIndex, selectedActionTargets, gameLogs, selectedScript]);
+
+  // 从localStorage读取对局记录
+  const loadGameRecords = useCallback(() => {
+    try {
+      const stored = localStorage.getItem('clocktower_game_records');
+      if (stored) {
+        const records = JSON.parse(stored) as GameRecord[];
+        setGameRecords(records);
+      }
+    } catch (error) {
+      console.error('读取对局记录失败:', error);
+    }
+  }, []);
+
+  // 保存对局记录到localStorage
+  const saveGameRecord = useCallback((record: GameRecord) => {
+    try {
+      const stored = localStorage.getItem('clocktower_game_records');
+      let records: GameRecord[] = stored ? JSON.parse(stored) : [];
+      // 将新记录添加到开头
+      records = [record, ...records];
+      // 最多保存100条记录
+      if (records.length > 100) {
+        records = records.slice(0, 100);
+      }
+      localStorage.setItem('clocktower_game_records', JSON.stringify(records));
+      setGameRecords(records);
+    } catch (error) {
+      console.error('保存对局记录失败:', error);
+    }
+  }, []);
 
   // --- Effects ---
   useEffect(() => {
       setMounted(true);
+      loadGameRecords(); // 加载对局记录
       setSeats(Array.from({ length: 15 }, (_, i) => ({ 
       id: i, 
       role: null, 
@@ -707,12 +1035,16 @@ export default function Home() {
       isProtected: false, 
       protectedBy: null,
       isRedHerring: false, 
+      isFortuneTellerRedHerring: false, 
       isSentenced: false, 
       masterId: null, 
       hasUsedSlayerAbility: false, 
       hasUsedVirginAbility: false, 
       isDemonSuccessor: false, 
-      statusDetails: []
+      hasAbilityEvenDead: false,
+      statusDetails: [],
+      grandchildId: null,
+      isGrandchild: false
       })));
       triggerIntroLoading();
   }, [triggerIntroLoading]);
@@ -758,12 +1090,17 @@ export default function Home() {
     });
   }, [nightCount, gamePhase]);
 
+  const isEvilWithJudgment = useCallback((seat: Seat): boolean => {
+    // 默认使用isEvil函数
+    return isEvil(seat);
+  }, []);
+
   const nightInfo = useMemo(() => {
     if ((gamePhase === "firstNight" || gamePhase === "night") && wakeQueueIds.length > 0 && currentWakeIndex >= 0 && currentWakeIndex < wakeQueueIds.length) {
-      return calculateNightInfo(seats, wakeQueueIds[currentWakeIndex], gamePhase, lastDuskExecution, fakeInspectionResultRef.current || undefined, drunkFirstInfoRef.current);
+      return calculateNightInfo(selectedScript, seats, wakeQueueIds[currentWakeIndex], gamePhase, lastDuskExecution, fakeInspectionResultRef.current || undefined, drunkFirstInfoRef.current, isEvilWithJudgment, poppyGrowerDead);
     }
     return null;
-  }, [seats, currentWakeIndex, gamePhase, wakeQueueIds, lastDuskExecution]);
+  }, [selectedScript, seats, currentWakeIndex, gamePhase, wakeQueueIds, lastDuskExecution, isEvilWithJudgment, poppyGrowerDead]);
 
   useEffect(() => {
     if (nightInfo) {
@@ -830,6 +1167,45 @@ export default function Home() {
       consoleContentRef.current.scrollTo({ top: 0, behavior: 'smooth' });
     }
   }, [currentWakeIndex, gamePhase]);
+
+  // 组件卸载时清理所有长按定时器
+  useEffect(() => {
+    return () => {
+      longPressTimerRef.current.forEach((timer) => {
+        clearTimeout(timer);
+      });
+      longPressTimerRef.current.clear();
+    };
+  }, []);
+
+  // 游戏结束时保存对局记录
+  const gameRecordSavedRef = useRef(false);
+  useEffect(() => {
+    if (gamePhase === 'gameOver' && winResult !== null && selectedScript && !gameRecordSavedRef.current) {
+      const endTime = new Date();
+      const duration = startTime ? Math.floor((endTime.getTime() - startTime.getTime()) / 1000) : timer;
+      
+      const record: GameRecord = {
+        id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+        scriptName: selectedScript.name,
+        startTime: startTime ? startTime.toISOString() : new Date().toISOString(),
+        endTime: endTime.toISOString(),
+        duration: duration,
+        winResult: winResult,
+        winReason: winReason,
+        seats: JSON.parse(JSON.stringify(seats)), // 深拷贝座位信息
+        gameLogs: [...gameLogs] // 拷贝游戏日志
+      };
+      
+      saveGameRecord(record);
+      gameRecordSavedRef.current = true;
+    }
+    
+    // 当游戏重新开始时，重置保存标记
+    if (gamePhase === 'scriptSelection' || gamePhase === 'setup') {
+      gameRecordSavedRef.current = false;
+    }
+  }, [gamePhase, winResult, selectedScript, startTime, timer, winReason, seats, gameLogs, saveGameRecord]);
 
   // 检查游戏结束条件
   const checkGameOver = useCallback((updatedSeats: Seat[]) => {
@@ -940,6 +1316,8 @@ export default function Home() {
 
   const handleSeatClick = (id: number) => {
     if(gamePhase==='setup') {
+      // 保存操作前的状态到历史记录
+      saveHistory();
       if(selectedRole) {
         if(seats.some(s=>s.role?.id===selectedRole.id)) {
           alert("该角色已入座");
@@ -965,26 +1343,26 @@ export default function Home() {
       setVirginNominatedThisGame(false);
 
     setTimeout(() => {
-      const drunk = compact.find(s => s.role?.id === "drunk" && !s.charadeRole);
-      if(drunk) { 
-        setShowDrunkModal(drunk.id); 
-        return; 
-      }
-      
-      const withRed = [...compact];
-      if(!withRed.some(s => s.isRedHerring)) {
-        const good = withRed.filter(s => ["townsfolk","outsider"].includes(s.role?.type || ""));
-        if(good.length > 0) {
-          const t = getRandom(good);
-          withRed[t.id] = { 
-            ...withRed[t.id], 
-            isRedHerring: true, 
-            statusDetails: [...withRed[t.id].statusDetails, "红罗刹"] 
-          };
+        const drunk = compact.find(s => s.role?.id === "drunk" && !s.charadeRole);
+        if(drunk) { 
+          setShowDrunkModal(drunk.id); 
+          return; 
         }
-      }
-      setSeats(withRed); 
-      setInitialSeats(JSON.parse(JSON.stringify(withRed))); 
+        
+        const withRed = [...compact];
+          if(!withRed.some(s => s.isRedHerring)) {
+            const good = withRed.filter(s => ["townsfolk","outsider"].includes(s.role?.type || ""));
+            if(good.length > 0) {
+              const t = getRandom(good);
+              withRed[t.id] = { 
+                ...withRed[t.id], 
+                isRedHerring: true, 
+                statusDetails: [...withRed[t.id].statusDetails, "红罗刹"] 
+              };
+            }
+        }
+        setSeats(withRed); 
+        setInitialSeats(JSON.parse(JSON.stringify(withRed))); 
       setGamePhase("check");
     }, 100);
   };
@@ -998,16 +1376,16 @@ export default function Home() {
         const active = updated.filter(s => s.role);
         const compact = active.map((s, i) => ({ ...s, id: i }));
         const withRed = [...compact];
-        if(!withRed.some(s => s.isRedHerring)) {
-          const good = withRed.filter(s => ["townsfolk","outsider"].includes(s.role?.type || ""));
-          if(good.length > 0) {
-            const t = getRandom(good);
-            withRed[t.id] = { 
-              ...withRed[t.id], 
-              isRedHerring: true, 
-              statusDetails: [...withRed[t.id].statusDetails, "红罗刹"] 
-            };
-          }
+          if(!withRed.some(s => s.isRedHerring)) {
+            const good = withRed.filter(s => ["townsfolk","outsider"].includes(s.role?.type || ""));
+            if(good.length > 0) {
+              const t = getRandom(good);
+              withRed[t.id] = { 
+                ...withRed[t.id], 
+                isRedHerring: true, 
+                statusDetails: [...withRed[t.id].statusDetails, "红罗刹"] 
+              };
+            }
         }
         setSeats(withRed); 
         setInitialSeats(JSON.parse(JSON.stringify(withRed))); 
@@ -1034,14 +1412,19 @@ export default function Home() {
     }
     
       if(isFirst) setStartTime(new Date());
-    setSeats(p => p.map(s => ({
-      ...s, 
-      isPoisoned: false, 
-      isProtected: false,
-      protectedBy: null,
-      voteCount: undefined, 
-      isCandidate: false
-    })));
+    setSeats(p => p.map(s => {
+      // 检查是否有永久中毒标记（舞蛇人制造的中毒）
+      const hasPermanentPoison = s.statusDetails?.includes('永久中毒') || false;
+      return {
+        ...s, 
+        // 如果有永久中毒标记，保持 isPoisoned 为 true，否则重置为 false
+        isPoisoned: hasPermanentPoison ? true : false, 
+        isProtected: false,
+        protectedBy: null,
+        voteCount: undefined, 
+        isCandidate: false
+      };
+    }));
       setDeadThisNight([]);
     fakeInspectionResultRef.current = null;
     
@@ -1055,15 +1438,48 @@ export default function Home() {
     // 注意：lastDuskExecution 在进入夜晚时应该保持为上一个黄昏的处决记录
     // 在进入新的黄昏时会被更新
     
-    const q = seats.filter(s => s.role).filter(s => !s.isDead || s.role?.id === 'ravenkeeper').sort((a,b) => {
+    // 夜半狂欢：首夜时，如果罂粟种植者在场，爪牙和恶魔不知道彼此
+    // 如果罂粟种植者不在场或已死亡，爪牙和恶魔知道彼此
+    const poppyGrower = seats.find(s => s.role?.id === 'poppy_grower');
+    if (isFirst) {
+      // 首夜时：如果罂粟种植者在场且存活，设置 poppyGrowerDead 为 false；否则为 true
+      if (poppyGrower && !poppyGrower.isDead) {
+        setPoppyGrowerDead(false); // 罂粟种植者在场且存活，爪牙和恶魔不知道彼此
+      } else {
+        setPoppyGrowerDead(true); // 罂粟种植者不在场或已死亡，爪牙和恶魔知道彼此
+      }
+    }
+    
+    // 夜半狂欢：首夜时，落难少女告知所有爪牙
+    if (isFirst) {
+      const damsel = seats.find(s => s.role?.id === 'damsel');
+      if (damsel) {
+        const minions = seats.filter(s => s.role?.type === 'minion' && !s.isDead);
+        if (minions.length > 0) {
+          const minionNames = minions.map(s => `${s.id+1}号`).join('、');
+          addLog(`落难少女在场，所有爪牙(${minionNames})都知道这个信息`);
+        }
+      }
+      
+      // 夜半狂欢：首夜时，灵言师得知关键词
+      const shaman = seats.find(s => s.role?.id === 'shaman');
+      if (shaman) {
+        const keywords = ['月亮', '星星', '太阳', '海洋', '山峰', '森林', '河流', '火焰', '风暴', '彩虹'];
+        const keyword = getRandom(keywords);
+        setShamanKeyword(keyword);
+        addLog(`灵言师(${shaman.id+1}号)的关键词是【${keyword}】`);
+      }
+    }
+    
+    const q = seats.filter(s => s.role).filter(s => !s.isDead || s.role?.id === 'ravenkeeper' || s.hasAbilityEvenDead).sort((a,b) => {
       const ra = a.role?.id === 'drunk' ? a.charadeRole : a.role;
       const rb = b.role?.id === 'drunk' ? b.charadeRole : b.role;
       return (isFirst ? (ra?.firstNightOrder??0) : (ra?.otherNightOrder??0)) - (isFirst ? (rb?.firstNightOrder??0) : (rb?.otherNightOrder??0));
     });
     const validQueue = q.filter(s => {
       const r = s.role?.id === 'drunk' ? s.charadeRole : s.role;
-      // 6. 跳过在夜晚死亡的玩家（小恶魔杀害的玩家），但守鸦人死亡的当晚需要被唤醒
-      if (s.isDead && !isFirst && s.role?.id !== 'ravenkeeper') {
+      // 6. 跳过在夜晚死亡的玩家（小恶魔杀害的玩家），但守鸦人死亡的当晚需要被唤醒，亡骨魔杀死的爪牙（保留能力）也需要被唤醒
+      if (s.isDead && !isFirst && s.role?.id !== 'ravenkeeper' && !s.hasAbilityEvenDead) {
         return false;
       }
       // 送葬者：如果上一个黄昏没有处决，不应该被唤醒
@@ -1086,7 +1502,10 @@ export default function Home() {
     // 保存历史记录
     saveHistory();
     
-    const max = nightInfo.effectiveRole.id==='fortune_teller' ? 2 : 1;
+    // 确定最大选择数量
+    let max = 1;
+    if (nightInfo.effectiveRole.id === 'fortune_teller') max = 2;
+    if (nightInfo.effectiveRole.id === 'hadesia' && gamePhase !== 'firstNight') max = 3;
     let newT = [...selectedActionTargets];
     
     if (newT.includes(id)) {
@@ -1197,6 +1616,92 @@ export default function Home() {
       if(action === 'kill' && nightInfo.effectiveRole.id === 'imp' && gamePhase !== 'firstNight') {
         // 只更新选择，不执行杀死，等待确认
       }
+      // ========== 夜半狂欢角色处理 ==========
+      if(action === 'mark' && nightInfo.effectiveRole.id === 'snake_charmer_mr' && newT.length === 1) {
+        // 舞蛇人：选择一名玩家，如果选中了恶魔，交换角色和阵营
+        const targetSeat = seats.find(s => s.id === newT[0]);
+        if (targetSeat && targetSeat.role && (targetSeat.role.type === 'demon' || targetSeat.isDemonSuccessor)) {
+          // 选中了恶魔，交换角色和阵营
+          const snakeCharmerSeat = nightInfo.seat;
+          const demonRole = targetSeat.role;
+          const snakeCharmerRole = snakeCharmerSeat.role;
+          
+          setSeats(p => p.map(s => {
+            if (s.id === snakeCharmerSeat.id) {
+              return { ...s, role: demonRole, isDemonSuccessor: targetSeat.isDemonSuccessor };
+            } else if (s.id === targetSeat.id) {
+              // 旧恶魔（新舞蛇人）：永久中毒，使用 statusDetails 标记
+              const statusDetails = s.statusDetails || [];
+              const hasPermanentPoison = statusDetails.includes('永久中毒');
+              return { 
+                ...s, 
+                role: snakeCharmerRole, 
+                isPoisoned: true, 
+                isDemonSuccessor: false,
+                statusDetails: hasPermanentPoison ? statusDetails : [...statusDetails, '永久中毒']
+              };
+            }
+            return s;
+          }));
+          
+          setGameLogs(prev => [...prev, { 
+            day: nightCount, 
+            phase: gamePhase, 
+            message: `${snakeCharmerSeat.id+1}号(舞蛇人) 选择 ${targetSeat.id+1}号，交换角色和阵营，${targetSeat.id+1}号中毒` 
+          }]);
+        } else {
+          // 没有选中恶魔，只记录选择
+          setGameLogs(prev => {
+            const filtered = prev.filter(log => 
+              !(log.message.includes(`${nightInfo.seat.id+1}号(舞蛇人)`) && log.phase === gamePhase)
+            );
+            return [...filtered, { day: nightCount, phase: gamePhase, message: `${nightInfo.seat.id+1}号(舞蛇人) 选择 ${newT[0]+1}号` }];
+          });
+        }
+      }
+      if(action === 'inspect' && nightInfo.effectiveRole.id === 'balloonist' && newT.length === 1) {
+        // 气球驾驶员：选择一名玩家，得知他的角色类型
+        const targetSeat = seats.find(s => s.id === newT[0]);
+        if (targetSeat && targetSeat.role) {
+          const roleType = targetSeat.role.type;
+          const typeNames: Record<string, string> = { 
+            townsfolk: "镇民", 
+            outsider: "外来者", 
+            minion: "爪牙", 
+            demon: "恶魔" 
+          };
+          setInspectionResult(`该玩家的角色类型是：${typeNames[roleType] || roleType}`);
+          setGameLogs(prev => {
+            const filtered = prev.filter(log => 
+              !(log.message.includes(`${nightInfo.seat.id+1}号(气球驾驶员)`) && log.phase === gamePhase)
+            );
+            return [...filtered, { day: nightCount, phase: gamePhase, message: `${nightInfo.seat.id+1}号(气球驾驶员) 选择 ${newT[0]+1}号，角色类型：${typeNames[roleType]}` }];
+          });
+        }
+      }
+      if(action === 'kill' && (nightInfo.effectiveRole.id === 'vigormortis_mr' || nightInfo.effectiveRole.id === 'hadesia') && gamePhase !== 'firstNight' && newT.length === 1) {
+        // 夜半狂欢恶魔：选择1名玩家后立即显示确认弹窗
+        setShowKillConfirmModal(newT[0]);
+        return;
+      }
+      if(action === 'kill' && nightInfo.effectiveRole.id === 'hadesia' && gamePhase !== 'firstNight' && newT.length === 3) {
+        // 哈迪寂亚：选择3名玩家后立即显示确认弹窗
+        setShowKillConfirmModal(newT[0]); // 使用第一个作为确认，实际处理需要特殊逻辑
+        return;
+      }
+      if(action === 'poison' && nightInfo.effectiveRole.id === 'poisoner_mr' && newT.length > 0) {
+        // 夜半狂欢投毒者：选择目标后立即显示确认弹窗
+        const targetId = newT[newT.length - 1];
+        const target = seats.find(s => s.id === targetId);
+        const isEvilPlayer = target && (['minion','demon'].includes(target.role?.type||'') || target.isDemonSuccessor);
+        if(isEvilPlayer) {
+          setShowPoisonEvilConfirmModal(targetId);
+        } else {
+          setShowPoisonConfirmModal(targetId);
+        }
+        setSeats(p => p.map(s => ({...s, isPoisoned: false})));
+        return;
+      }
     } else {
       const action = nightInfo.effectiveRole.nightActionType;
       if(action === 'poison') {
@@ -1236,8 +1741,8 @@ export default function Home() {
             nightInfo.seat.id,
             '占卜师'
           );
-        }
-      } else {
+      }
+    } else {
         // 目标数不足 2 时，清空当前显示结果，等待重新选择
         setInspectionResult(null);
       }
@@ -1266,7 +1771,7 @@ export default function Home() {
     
     // 检查是否有待确认的操作（投毒者和恶魔的确认弹窗已在toggleTarget中处理）
     // 如果有打开的确认弹窗，不继续流程
-    if(showKillConfirmModal !== null || showPoisonConfirmModal !== null || showPoisonEvilConfirmModal !== null || 
+    if(showKillConfirmModal !== null || showPoisonConfirmModal !== null || showPoisonEvilConfirmModal !== null || showHadesiaKillConfirmModal !== null || 
        showRavenkeeperResultModal !== null || showRavenkeeperFakeModal !== null) {
       return;
     }
@@ -1279,18 +1784,19 @@ export default function Home() {
     // 保存历史记录
     saveHistory();
     
-    // 检查是否有玩家在夜晚死亡，需要跳过他们的环节
-    const currentDead = seats.filter(s => s.isDead);
+    // 检查是否有玩家在夜晚死亡，需要跳过他们的环节（但亡骨魔杀死的爪牙保留能力，需要被唤醒）
+    const currentDead = seats.filter(s => s.isDead && !s.hasAbilityEvenDead);
     setWakeQueueIds(prev => prev.filter(id => !currentDead.find(d => d.id === id)));
     
-    // 如果当前玩家已死亡，跳过到下一个
+    // 如果当前玩家已死亡（且不保留能力），跳过到下一个
     const currentId = wakeQueueIds[currentWakeIndex];
-    if (currentId !== undefined && seats.find(s => s.id === currentId)?.isDead) {
-      setCurrentWakeIndex(p => p + 1);
-      setInspectionResult(null);
-      setSelectedActionTargets([]);
-      fakeInspectionResultRef.current = null;
-      return;
+    const currentSeat = currentId !== undefined ? seats.find(s => s.id === currentId) : null;
+    if (currentId !== undefined && currentSeat?.isDead && !currentSeat.hasAbilityEvenDead) {
+        setCurrentWakeIndex(p => p + 1);
+        setInspectionResult(null);
+        setSelectedActionTargets([]);
+        fakeInspectionResultRef.current = null;
+        return;
     }
     
     if(currentWakeIndex < wakeQueueIds.length - 1) { 
@@ -1313,6 +1819,41 @@ export default function Home() {
   // 确认夜晚死亡报告后进入白天
   const confirmNightDeathReport = () => {
     setShowNightDeathReportModal(null);
+    
+    // 检查罂粟种植者是否死亡，如果死亡，告知爪牙和恶魔彼此
+    const poppyGrower = seats.find(s => s.role?.id === 'poppy_grower');
+    if (poppyGrower && poppyGrower.isDead && !poppyGrowerDead) {
+      setPoppyGrowerDead(true);
+      const minions = seats.filter(s => s.role?.type === 'minion' && !s.isDead);
+      const demons = seats.filter(s => (s.role?.type === 'demon' || s.isDemonSuccessor) && !s.isDead);
+      const minionNames = minions.map(s => `${s.id+1}号`).join('、');
+      const demonNames = demons.map(s => `${s.id+1}号`).join('、');
+      if (minions.length > 0 && demons.length > 0) {
+        addLog(`罂粟种植者已死亡，爪牙(${minionNames})和恶魔(${demonNames})现在得知彼此`);
+      }
+    }
+    
+    // 检查农夫是否在夜晚死亡，如果死亡，转换一名善良玩家为农夫
+    const deadFarmer = deadThisNight.find(id => {
+      const seat = seats.find(s => s.id === id);
+      return seat?.role?.id === 'farmer';
+    });
+    if (deadFarmer !== undefined) {
+      const aliveGood = seats.filter(s => 
+        !s.isDead && 
+        s.id !== deadFarmer &&
+        (s.role?.type === 'townsfolk' || s.role?.type === 'outsider')
+      );
+      if (aliveGood.length > 0) {
+        const newFarmer = getRandom(aliveGood);
+        const farmerRole = roles.find(r => r.id === 'farmer');
+        setSeats(p => p.map(s => 
+          s.id === newFarmer.id ? { ...s, role: farmerRole || s.role } : s
+        ));
+        addLog(`${deadFarmer+1}号(农夫)在夜晚死亡，${newFarmer.id+1}号变成农夫`);
+      }
+    }
+    
     setDeadThisNight([]); // 清空夜晚死亡记录
     // 使用seatsRef确保获取最新的seats状态，然后检查游戏结束条件
     const currentSeats = seatsRef.current;
@@ -1412,25 +1953,88 @@ export default function Home() {
         }
       }
       if(target && !isEffectivelyProtected && target.role?.id !== 'soldier' && !target.isDead) {
-        setSeats(p => {
-          const updated = p.map(s => s.id === targetId ? { ...s, isDead: true } : s);
-          // 从唤醒队列中移除已死亡的玩家
-          setWakeQueueIds(prev => prev.filter(id => id !== targetId));
-          // 检查游戏结束
-          checkGameOver(updated);
-          return updated;
-        });
-        setDeadThisNight(p => [...p, targetId]);
-        if (nightInfo) {
-          addLogWithDeduplication(
-            `${nightInfo.seat.id+1}号(小恶魔) 杀害 ${targetId+1}号，${targetId+1}号已在夜晚死亡，跳过`,
-            nightInfo.seat.id,
-            '小恶魔'
+        // 夜半狂欢亡骨魔特殊处理：杀死爪牙时，爪牙保留能力，且邻近的两名镇民之一中毒
+        if (nightInfo.effectiveRole.id === 'vigormortis_mr' && target.role?.type === 'minion') {
+          // 找到邻近的两名镇民
+          const targetIndex = seats.findIndex(s => s.id === targetId);
+          const totalSeats = seats.length;
+          const leftIndex = (targetIndex - 1 + totalSeats) % totalSeats;
+          const rightIndex = (targetIndex + 1) % totalSeats;
+          const leftNeighbor = seats[leftIndex];
+          const rightNeighbor = seats[rightIndex];
+          const townsfolkNeighbors = [leftNeighbor, rightNeighbor].filter(s => 
+            s.role?.type === 'townsfolk' && !s.isDead
           );
+          
+          // 随机选择一名镇民中毒
+          const poisonedNeighbor = townsfolkNeighbors.length > 0 ? getRandom(townsfolkNeighbors) : null;
+          
+          setSeats(p => {
+            const updated = p.map(s => {
+              if (s.id === targetId) {
+                // 亡骨魔杀死的爪牙：死亡但保留能力
+                return { ...s, isDead: true, hasAbilityEvenDead: true };
+              } else if (poisonedNeighbor && s.id === poisonedNeighbor.id) {
+                return { ...s, isPoisoned: true };
+              }
+              return s;
+            });
+            // 不要从唤醒队列中移除，因为爪牙保留能力，需要在夜晚被唤醒
+            checkGameOver(updated);
+            return updated;
+          });
+          
+          setDeadThisNight(p => [...p, targetId]);
+          if (nightInfo) {
+            const neighborInfo = poisonedNeighbor ? `，${poisonedNeighbor.id+1}号(邻近镇民)中毒` : '';
+            addLogWithDeduplication(
+              `${nightInfo.seat.id+1}号(亡骨魔) 杀害 ${targetId+1}号(爪牙)，爪牙保留能力${neighborInfo}`,
+              nightInfo.seat.id,
+              '亡骨魔'
+            );
+          }
+        } else {
+          // 正常杀死其他玩家
+          setSeats(p => {
+            const updated = p.map(s => s.id === targetId ? { ...s, isDead: true } : s);
+            // 从唤醒队列中移除已死亡的玩家
+            setWakeQueueIds(prev => prev.filter(id => id !== targetId));
+            // 检查游戏结束
+            checkGameOver(updated);
+            return updated;
+          });
+          setDeadThisNight(p => [...p, targetId]);
+          if (nightInfo) {
+            const demonName = nightInfo.effectiveRole.id === 'hadesia' ? '哈迪寂亚' : 
+                             nightInfo.effectiveRole.id === 'vigormortis_mr' ? '亡骨魔' : '小恶魔';
+            addLogWithDeduplication(
+              `${nightInfo.seat.id+1}号(${demonName}) 杀害 ${targetId+1}号，${targetId+1}号已在夜晚死亡`,
+              nightInfo.seat.id,
+              demonName
+            );
+          }
         }
       }
     }
     setShowKillConfirmModal(null);
+    continueToNextAction();
+  };
+
+  // 确认哈迪寂亚杀死3名玩家
+  const confirmHadesiaKill = () => {
+    if(!nightInfo || !showHadesiaKillConfirmModal || showHadesiaKillConfirmModal.length !== 3) return;
+    const targetIds = showHadesiaKillConfirmModal;
+    
+    // 哈迪寂亚：三名玩家秘密决定自己的命运，如果他们全部存活，他们全部死亡
+    // 这里简化处理：说书人需要手动决定哪些玩家死亡
+    // 所有玩家都会得知哈迪寂亚选择了谁
+    const targetNames = targetIds.map(id => `${id+1}号`).join('、');
+    addLog(`${nightInfo.seat.id+1}号(哈迪寂亚) 选择了 ${targetNames}，所有玩家都会得知这个选择`);
+    addLog(`请说书人决定 ${targetNames} 的命运。如果他们全部存活，他们全部死亡。`);
+    
+    // 这里需要说书人手动处理，暂时只记录日志
+    setShowHadesiaKillConfirmModal(null);
+    setSelectedActionTargets([]);
     continueToNextAction();
   };
   
@@ -1473,7 +2077,7 @@ export default function Home() {
     // 10. 检查小恶魔是否被处决 - 立即结束游戏
     let newSeats = seats.map(s => s.id === id ? { ...s, isDead: true } : s);
     
-    // 10. 立即检查小恶魔是否死亡
+    // 10. 立即检查恶魔是否死亡（包括所有恶魔类型）
     if ((t.role?.type === 'demon' || t.isDemonSuccessor)) {
       setSeats(newSeats);
       addLog(`${id+1}号(小恶魔) 被处决`);
@@ -1524,6 +2128,39 @@ export default function Home() {
       }
     }
     
+    // 无神论者特殊处理：如果说书人被处决（这里用特殊标记表示），好人获胜
+    // 注意：实际游戏中，说书人不会被处决，这里只是逻辑标记
+    if (t?.role?.id === 'atheist') {
+      // 无神论者被处决时，检查是否有特殊标记表示"说书人被处决"
+      // 实际游戏中需要说书人手动标记
+      // 这里简化处理：如果无神论者被处决，说书人可以手动触发好人获胜
+      addLog(`${id+1}号(无神论者) 被处决。如果说书人被处决，好人阵营获胜。`);
+    }
+    
+    // 食人族：获得最后被处决玩家的能力
+    const cannibal = seats.find(s => s.role?.id === 'cannibal' && !s.isDead);
+    if (cannibal && t && t.role) {
+      // 检查被处决的玩家是否是邪恶阵营
+      const roleType = t.role.type as RoleType;
+      const isEvilExecuted = (roleType === 'demon' || roleType === 'minion' || t.isDemonSuccessor);
+      setSeats(p => p.map(s => {
+        if (s.id === cannibal.id) {
+          return { 
+            ...s, 
+            isPoisoned: isEvilExecuted ? true : false,
+            // 记录最后被处决的玩家ID，用于后续能力处理
+            masterId: id
+          };
+        }
+        return s;
+      }));
+      if (isEvilExecuted) {
+        addLog(`${cannibal.id+1}号(食人族) 获得 ${id+1}号的能力，但因该玩家是邪恶的，食人族中毒直到下一个善良玩家被处决`);
+      } else {
+        addLog(`${cannibal.id+1}号(食人族) 获得 ${id+1}号的能力`);
+      }
+    }
+    
     setSeats(newSeats);
     addLog(`${id+1}号 被处决`); 
     setExecutedPlayerId(id);
@@ -1543,6 +2180,10 @@ export default function Home() {
       addLog("游戏结束：圣徒被处决，邪恶胜利");
       return; 
     }
+    
+    // 无神论者特殊胜利条件：如果说书人被处决，好人阵营获胜
+    // 注意：这里需要说书人手动标记"说书人被处决"
+    // 暂时不自动触发，需要说书人手动处理
     
     // 5. 屏蔽浏览器弹窗，直接进入夜晚
     setTimeout(() => { 
@@ -1568,15 +2209,15 @@ export default function Home() {
       // 贞洁者逻辑：当真正的镇民在贞洁者健康状态下提名贞洁者时，且贞洁者也是本局游戏中首次被提名
       // 即使提名者是中毒状态，也会被立即处决，并进入下一个黑夜
       const target = seats.find(s => s.id === id);
-      const nominator = seats.find(s => s.id === sourceId);
+      const nominatorSeat = seats.find(s => s.id === sourceId);
       
       if (target?.role?.id === 'virgin' && !target.hasUsedVirginAbility && !target.isPoisoned && !virginNominatedThisGame) {
         // 检查提名者是否是真正的镇民（不是酒鬼伪装的）
         // 注意：即使提名者是中毒状态，也会被立即处决
-        const isRealTownsfolk = nominator && 
-                                nominator.role?.type === 'townsfolk' && 
-                                nominator.role?.id !== 'drunk' &&
-                                !nominator.isDrunk;
+        const isRealTownsfolk = nominatorSeat && 
+                                nominatorSeat.role?.type === 'townsfolk' && 
+                                nominatorSeat.role?.id !== 'drunk' &&
+                                !nominatorSeat.isDrunk;
         if (isRealTownsfolk) {
           // 贞洁者首次被提名，立即处决提名者（无视任何规则，包括中毒状态），并立即进入下一个黑夜
           setVirginNominatedThisGame(true);
@@ -1595,6 +2236,27 @@ export default function Home() {
           setShowExecutionResultModal({ message: `${sourceId+1}号玩家被处决`, isVirginTrigger: true });
           return;
         }
+      }
+      
+      // 魔像特殊逻辑：如果提名的玩家不是恶魔，他死亡
+      if (nominatorSeat?.role?.id === 'golem') {
+        const target = seats.find(s => s.id === id);
+        const isDemon = target && (target.role?.type === 'demon' || target.isDemonSuccessor);
+        if (!isDemon) {
+          // 不是恶魔，目标死亡
+          setSeats(p => p.map(s => s.id === id ? { ...s, isDead: true } : s));
+          addLog(`${sourceId+1}号(魔像) 提名 ${id+1}号，${id+1}号不是恶魔，${id+1}号死亡`);
+          // 检查游戏结束
+          const updatedSeats = seats.map(s => s.id === id ? { ...s, isDead: true } : s);
+          if (checkGameOver(updatedSeats)) {
+            return;
+          }
+          // 标记魔像已使用能力
+          setSeats(p => p.map(s => s.id === sourceId ? { ...s, hasUsedSlayerAbility: true } : s));
+          return;
+        }
+        // 是恶魔，正常提名流程
+        setSeats(p => p.map(s => s.id === sourceId ? { ...s, hasUsedSlayerAbility: true } : s));
       }
       
       // 更新提名记录
@@ -1738,6 +2400,63 @@ export default function Home() {
     setContextMenu({x:e.clientX,y:e.clientY,seatId}); 
   };
 
+  // 触屏长按处理：开始长按
+  const handleTouchStart = (e: React.TouchEvent, seatId: number) => {
+    e.stopPropagation();
+    // 清除可能存在的旧定时器
+    const existingTimer = longPressTimerRef.current.get(seatId);
+    if (existingTimer) {
+      clearTimeout(existingTimer);
+    }
+    // 添加长按状态，用于视觉反馈
+    setLongPressingSeats(prev => new Set(prev).add(seatId));
+    // 获取触摸位置
+    const touch = e.touches[0];
+    // 设置0.5秒后触发右键菜单
+    const timer = setTimeout(() => {
+      setContextMenu({x:touch.clientX, y:touch.clientY, seatId});
+      longPressTimerRef.current.delete(seatId);
+      setLongPressingSeats(prev => {
+        const next = new Set(prev);
+        next.delete(seatId);
+        return next;
+      });
+    }, 500);
+    longPressTimerRef.current.set(seatId, timer);
+  };
+
+  // 触屏长按处理：结束触摸（取消长按）
+  const handleTouchEnd = (e: React.TouchEvent, seatId: number) => {
+    e.stopPropagation();
+    const timer = longPressTimerRef.current.get(seatId);
+    if (timer) {
+      clearTimeout(timer);
+      longPressTimerRef.current.delete(seatId);
+    }
+    // 清除长按状态
+    setLongPressingSeats(prev => {
+      const next = new Set(prev);
+      next.delete(seatId);
+      return next;
+    });
+  };
+
+  // 触屏长按处理：触摸移动（取消长按）
+  const handleTouchMove = (e: React.TouchEvent, seatId: number) => {
+    e.stopPropagation();
+    const timer = longPressTimerRef.current.get(seatId);
+    if (timer) {
+      clearTimeout(timer);
+      longPressTimerRef.current.delete(seatId);
+    }
+    // 清除长按状态
+    setLongPressingSeats(prev => {
+      const next = new Set(prev);
+      next.delete(seatId);
+      return next;
+    });
+  };
+
   const handleMenuAction = (action: string) => {
     if(!contextMenu) return;
     if(action==='nominate') { 
@@ -1863,13 +2582,113 @@ export default function Home() {
   };
 
   const handleRestart = () => {
-    if (confirm("确定重开?")) window.location.reload();
+    setShowRestartConfirmModal(true);
+  };
+
+  const confirmRestart = () => {
+    // 如果游戏正在进行（不是scriptSelection阶段），先保存对局记录
+    if (gamePhase !== 'scriptSelection' && selectedScript) {
+      // 添加重开游戏的日志
+      const updatedLogs = [...gameLogs, { day: nightCount, phase: gamePhase, message: "说书人重开了游戏" }];
+      
+      // 立即保存对局记录
+      const endTime = new Date();
+      const duration = startTime ? Math.floor((endTime.getTime() - startTime.getTime()) / 1000) : timer;
+      
+      const record: GameRecord = {
+        id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+        scriptName: selectedScript.name,
+        startTime: startTime ? startTime.toISOString() : new Date().toISOString(),
+        endTime: endTime.toISOString(),
+        duration: duration,
+        winResult: null, // 重开，无胜负结果
+        winReason: "说书人重开了游戏",
+        seats: JSON.parse(JSON.stringify(seats)), // 深拷贝座位信息
+        gameLogs: updatedLogs // 包含重开日志的完整日志
+      };
+      
+      saveGameRecord(record);
+    }
+    
+    window.location.reload();
+  };
+
+  // 切换剧本：如果游戏正在进行，先结束游戏并保存记录
+  const handleSwitchScript = () => {
+    // 如果游戏正在进行（不是scriptSelection阶段），先结束游戏并保存记录
+    if (gamePhase !== 'scriptSelection' && selectedScript) {
+      // 添加结束游戏的日志
+      const updatedLogs = [...gameLogs, { day: nightCount, phase: gamePhase, message: "说书人结束了游戏" }];
+      
+      // 立即保存对局记录
+      const endTime = new Date();
+      const duration = startTime ? Math.floor((endTime.getTime() - startTime.getTime()) / 1000) : timer;
+      
+      const record: GameRecord = {
+        id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+        scriptName: selectedScript.name,
+        startTime: startTime ? startTime.toISOString() : new Date().toISOString(),
+        endTime: endTime.toISOString(),
+        duration: duration,
+        winResult: null, // 说书人结束，无胜负结果
+        winReason: "说书人结束了游戏",
+        seats: JSON.parse(JSON.stringify(seats)), // 深拷贝座位信息
+        gameLogs: updatedLogs // 包含结束日志的完整日志
+      };
+      
+      saveGameRecord(record);
+    }
+    
+    // 切换到剧本选择页面
+    triggerIntroLoading();
+    setGamePhase('scriptSelection');
+    setSelectedScript(null);
+    setNightCount(1);
+    setExecutedPlayerId(null);
+    setWakeQueueIds([]);
+    setCurrentWakeIndex(0);
+    setSelectedActionTargets([]);
+    // 注意：这里不清空gameLogs，保留游戏记录，用户可以在复盘时查看
+    setWinResult(null);
+    setDeadThisNight([]);
+    setSelectedRole(null);
+    setInspectionResult(null);
+    setCurrentHint({ isPoisoned: false, guide: "", speak: "" });
+    setTimer(0);
+    setStartTime(null);
+    setHistory([]);
+    setWinReason(null);
+    hintCacheRef.current.clear();
+    drunkFirstInfoRef.current.clear();
+    setSeats(Array.from({ length: 15 }, (_, i) => ({ 
+      id: i, 
+      role: null, 
+      charadeRole: null, 
+      isDead: false, 
+      isDrunk: false, 
+      isPoisoned: false, 
+      isProtected: false, 
+      protectedBy: null,
+      isRedHerring: false, 
+      isFortuneTellerRedHerring: false, 
+      isSentenced: false, 
+      masterId: null, 
+      hasUsedSlayerAbility: false, 
+      hasUsedVirginAbility: false, 
+      isDemonSuccessor: false, 
+      hasAbilityEvenDead: false,
+      statusDetails: [],
+      grandchildId: null,
+      isGrandchild: false
+    })));
+    setInitialSeats([]);
   };
 
   // 重置游戏到setup阶段（再来一局）
   const handleNewGame = () => {
     triggerIntroLoading();
-    setGamePhase('setup');
+    setGamePhase('scriptSelection');
+    setSelectedScript(null);
     setNightCount(1);
     setExecutedPlayerId(null);
     setWakeQueueIds([]);
@@ -1897,12 +2716,16 @@ export default function Home() {
       isProtected: false, 
       protectedBy: null,
       isRedHerring: false, 
+      isFortuneTellerRedHerring: false, 
       isSentenced: false, 
       masterId: null, 
       hasUsedSlayerAbility: false, 
       hasUsedVirginAbility: false, 
       isDemonSuccessor: false, 
-      statusDetails: []
+      hasAbilityEvenDead: false,
+      statusDetails: [],
+      grandchildId: null,
+      isGrandchild: false
     })));
     setInitialSeats([]);
   };
@@ -1919,7 +2742,8 @@ export default function Home() {
       currentWakeIndex: state.currentWakeIndex,
       selectedActionTargets: [...state.selectedActionTargets],
       gameLogs: [...state.gameLogs],
-      currentHint: JSON.parse(JSON.stringify(currentHint)) // 保存当前 hint
+      currentHint: JSON.parse(JSON.stringify(currentHint)), // 保存当前 hint
+      selectedScript: state.selectedScript // 保存选中的剧本
     }]);
   };
 
@@ -1949,29 +2773,58 @@ export default function Home() {
   };
   
   // 9.2 全局上一步：撤销当前动作，清除缓存，重新生成信息
-  // 支持无限次撤回，直到游戏开始（setup阶段）
+  // 支持无限次撤回，直到"选择剧本"页面
   const handleGlobalUndo = () => {
-    if (history.length === 0) {
-      // 如果历史记录为空，但不在setup阶段，可以尝试回到setup阶段
-      if (gamePhase !== 'setup') {
-        // 重置到游戏开始状态
-        setGamePhase('setup');
-        setNightCount(1);
-        setExecutedPlayerId(null);
-        setWakeQueueIds([]);
-        setCurrentWakeIndex(0);
-        setSelectedActionTargets([]);
-        setGameLogs([]);
-        hintCacheRef.current.clear();
-        // 恢复初始座位（如果有保存的话）
-        if (initialSeats.length > 0) {
-          setSeats(JSON.parse(JSON.stringify(initialSeats)));
-        }
-        return;
-      }
-      alert("已经回到游戏开始状态，无法继续撤回");
+    // 如果在"选择剧本"页面，无效
+    if (gamePhase === 'scriptSelection') {
       return;
     }
+    
+    if (history.length === 0) {
+      // 如果历史记录为空，尝试回到"选择剧本"页面
+      setGamePhase('scriptSelection');
+      setSelectedScript(null);
+      setNightCount(1);
+      setExecutedPlayerId(null);
+      setWakeQueueIds([]);
+      setCurrentWakeIndex(0);
+      setSelectedActionTargets([]);
+      setGameLogs([]);
+      setWinResult(null);
+      setWinReason(null);
+      setDeadThisNight([]);
+      setSelectedRole(null);
+      setInspectionResult(null);
+      setCurrentHint({ isPoisoned: false, guide: "", speak: "" });
+      setTimer(0);
+      setStartTime(null);
+      hintCacheRef.current.clear();
+      drunkFirstInfoRef.current.clear();
+      setSeats(Array.from({ length: 15 }, (_, i) => ({ 
+        id: i, 
+        role: null, 
+        charadeRole: null, 
+        isDead: false, 
+        isDrunk: false, 
+        isPoisoned: false, 
+        isProtected: false, 
+        protectedBy: null,
+        isRedHerring: false, 
+        isFortuneTellerRedHerring: false, 
+        isSentenced: false, 
+        masterId: null, 
+        hasUsedSlayerAbility: false, 
+        hasUsedVirginAbility: false, 
+        isDemonSuccessor: false, 
+        hasAbilityEvenDead: false,
+        statusDetails: [],
+        grandchildId: null,
+        isGrandchild: false
+      })));
+      setInitialSeats([]);
+      return;
+    }
+    
     const lastState = history[history.length - 1];
     setSeats(lastState.seats);
     setGamePhase(lastState.gamePhase);
@@ -1981,6 +2834,7 @@ export default function Home() {
     setCurrentWakeIndex(lastState.currentWakeIndex);
     setSelectedActionTargets(lastState.selectedActionTargets);
     setGameLogs(lastState.gameLogs);
+    setSelectedScript(lastState.selectedScript); // 恢复选中的剧本
     
     // 清除 hint 缓存，让信息重新生成（符合"全局上一步"的需求）
     hintCacheRef.current.clear();
@@ -2016,9 +2870,9 @@ export default function Home() {
       )}
       {/* ===== 暗流涌动剧本（游戏第一部分）主界面 ===== */}
       <div className="w-3/5 relative flex items-center justify-center border-r border-gray-700">
-        {/* 2. 万能上一步按钮 - 移到左侧圆桌右上角 */}
-        {/* 支持无限次撤回，直到游戏开始（setup阶段） */}
-        {(history.length > 0 || gamePhase !== 'setup') && (
+        {/* 2. 万能上一步按钮 - 固定位置在左侧圆桌右上角 */}
+        {/* 支持无限次撤回，直到"选择剧本"页面，在"选择剧本"页面无效 */}
+        {gamePhase !== 'scriptSelection' && (
           <button
             onClick={handleGlobalUndo}
             className="absolute top-4 right-4 z-50 px-4 py-2 bg-blue-600 rounded-xl font-bold text-sm shadow-lg hover:bg-blue-700 transition-colors"
@@ -2029,18 +2883,16 @@ export default function Home() {
             </div>
           </button>
         )}
-        {nightInfo && (
-          <div className="absolute top-4 left-4 text-sm font-bold text-blue-300 bg-black/50 px-4 py-2 rounded-xl shadow-lg border border-blue-500 z-50">
-            当前{nightInfo.seat.id+1}号{nightInfo.effectiveRole.name}行动
-          </div>
-        )}
         <div className="absolute pointer-events-none text-center z-0 top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2">
           <div className="text-6xl font-bold opacity-50 mb-4">{phaseNames[gamePhase]}</div>
           <div className="text-xs text-gray-500 opacity-40 mb-2">
             design by{" "}
             <span className="font-bold italic">Bai  Gan Group</span>
           </div>
-          {gamePhase!=='setup' && (
+          {gamePhase==='scriptSelection' && (
+            <div className="text-5xl font-mono text-yellow-300">请选择剧本</div>
+          )}
+          {gamePhase!=='setup' && gamePhase!=='scriptSelection' && (
             <div className="text-5xl font-mono text-yellow-300">{formatTimer(timer)}</div>
           )}
         </div>
@@ -2053,14 +2905,22 @@ export default function Home() {
                 key={s.id} 
                 onClick={(e)=>{e.stopPropagation();handleSeatClick(s.id)}} 
                 onContextMenu={(e)=>handleContextMenu(e,s.id)}
+                onTouchStart={(e)=>handleTouchStart(e,s.id)}
+                onTouchEnd={(e)=>handleTouchEnd(e,s.id)}
+                onTouchMove={(e)=>handleTouchMove(e,s.id)}
                   style={{left:`${p.x}%`,top:`${p.y}%`,transform:'translate(-50%,-50%)'}} 
                 className={`absolute w-24 h-24 rounded-full border-4 flex items-center justify-center cursor-pointer z-30 bg-gray-900 transition-all duration-300
                   ${colorClass} 
                   ${nightInfo?.seat.id===s.id?'ring-4 ring-yellow-400 scale-110 shadow-[0_0_30px_yellow]':''} 
                   ${s.isDead?'grayscale opacity-60':''} 
                   ${selectedActionTargets.includes(s.id)?'ring-4 ring-green-500 scale-105':''}
+                  ${longPressingSeats.has(s.id)?'ring-4 ring-blue-400 animate-pulse':''}
                 `}
               >
+                {/* 长按进度指示器 */}
+                {longPressingSeats.has(s.id) && (
+                  <div className="absolute inset-0 rounded-full border-4 border-blue-400 animate-ping opacity-75"></div>
+                )}
                 {/* 座位号 - 左上角 */}
                 <div className="absolute -top-5 -left-5 w-9 h-9 bg-gray-800 rounded-full border-2 border-gray-600 flex items-center justify-center text-base font-bold z-40">
                   {s.id+1}
@@ -2101,34 +2961,46 @@ export default function Home() {
           </div>
       </div>
 
-      <div className="w-2/5 flex flex-col border-l border-gray-800 bg-gray-900/95 z-40">
+      <div className={`w-2/5 flex flex-col border-l border-gray-800 z-40 transition-all duration-500 ${
+        gamePhase === 'scriptSelection' 
+          ? 'bg-gray-800/90' 
+          : 'bg-gray-900/95'
+      }`}>
         <div className="px-4 py-2 pb-4 border-b flex items-center justify-between relative">
-          <span className="font-bold text-purple-400 text-xl scale-[1.3] origin-left">控制台</span>
-          {nightInfo && (
-            <span className="text-base text-yellow-300 font-normal absolute left-1/2 -translate-x-1/2">
-              当前是{nightInfo.seat.id+1}号{nightInfo.effectiveRole.name}在行动
-            </span>
-          )}
-          <div className="flex gap-2 items-center scale-[1.3] origin-right">
+          <span className="font-bold text-purple-400 text-xl scale-[1.3] flex items-center justify-center h-8 flex-shrink-0">控制台</span>
+          <div className="flex items-center flex-shrink-0">
+            <button 
+              onClick={()=>setShowGameRecordsModal(true)} 
+              className="px-2 py-1 bg-green-600 border rounded text-sm shadow-lg h-8 flex items-center justify-center scale-[1.3] flex-shrink-0 mr-[28px]"
+            >
+              对局记录
+            </button>
             <button 
               onClick={()=>setShowReviewModal(true)} 
-              className="px-2 py-1 bg-indigo-600 border rounded text-sm shadow-lg"
+              className="px-2 py-1 bg-indigo-600 border rounded text-sm shadow-lg h-8 flex items-center justify-center scale-[1.3] flex-shrink-0 mr-[22px]"
             >
               复盘
             </button>
-            <button 
-              onClick={(e)=>{e.stopPropagation();setShowMenu(!showMenu)}} 
-              className="px-2 py-1 bg-gray-800 border rounded text-sm shadow-lg"
-            >
-              ☰
-            </button>
-            {showMenu && (
-              <div className="absolute right-4 top-full mt-1 w-48 bg-gray-800 border rounded-lg shadow-xl z-[1000]">
+            <div className="relative flex-shrink-0">
+              <button 
+                onClick={(e)=>{e.stopPropagation();setShowMenu(!showMenu)}} 
+                className="px-2 py-1 bg-gray-800 border rounded text-sm shadow-lg h-8 flex items-center justify-center scale-[1.3]"
+              >
+                ☰
+              </button>
+              {showMenu && (
+                <div className="absolute right-0 top-full mt-1 w-48 bg-gray-800 border rounded-lg shadow-xl z-[1000]">
                 <button 
                   onClick={()=>{setShowRoleInfoModal(true);setShowMenu(false)}} 
                   className="w-full p-4 text-left text-blue-400 hover:bg-gray-700 border-b border-gray-700"
                 >
                   📖 角色信息
+                </button>
+                <button 
+                  onClick={()=>{handleSwitchScript();setShowMenu(false)}} 
+                  className="w-full p-4 text-left text-purple-400 hover:bg-gray-700 border-b border-gray-700"
+                >
+                  🔀 切换剧本
                 </button>
                 <button 
                   onClick={handleRestart} 
@@ -2138,9 +3010,43 @@ export default function Home() {
                 </button>
               </div>
             )}
+            </div>
           </div>
+          {nightInfo && (
+            <span className="text-3xl font-bold text-white absolute left-1/2 -translate-x-1/2 top-full mt-2">
+              当前是<span className="text-yellow-300">{nightInfo.seat.id+1}号{nightInfo.effectiveRole.name}</span>在行动
+            </span>
+          )}
         </div>
           <div ref={consoleContentRef} className="flex-1 overflow-y-auto p-4 text-base">
+          {/* 剧本选择页面 */}
+          {gamePhase==='scriptSelection' && (
+            <div className="flex flex-col items-center justify-center min-h-full">
+              <h2 className="text-4xl font-bold mb-2 text-white">选择剧本</h2>
+              <p className="text-gray-400 italic mb-8">更多剧本开发中…</p>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 w-full max-w-4xl">
+                {scripts.map(script => (
+                  <button
+                    key={script.id}
+                    onClick={() => {
+                      // 保存选择剧本前的状态到历史记录
+                      saveHistory();
+                      setSelectedScript(script);
+                      setGameLogs([]); // 选择新剧本时清空之前的游戏记录
+                      setGamePhase('setup');
+                    }}
+                    className="p-8 bg-gray-800 border-4 border-gray-600 rounded-2xl hover:border-blue-500 hover:bg-gray-700 transition-all text-center flex flex-col items-center justify-center"
+                  >
+                    <div className="text-2xl font-bold text-white mb-2">{script.name}</div>
+                    <div className="text-sm text-gray-400">难度：{script.difficulty}</div>
+                    {script.description && (
+                      <div className="text-sm text-gray-300 mt-2">{script.description}</div>
+                    )}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
           {/* 4. 白天控制台增加说书人提示 */}
           {gamePhase==='day' && (
             <div className="mb-4 p-3 bg-gray-800/50 border border-yellow-500/30 rounded-lg text-sm text-gray-300 leading-relaxed">
@@ -2152,7 +3058,7 @@ export default function Home() {
           )}
           {gamePhase==='setup' && (
             <div className="space-y-6">
-              {Object.entries(groupedRoles).map(([type, list]) => (
+              {Object.entries(filteredGroupedRoles).map(([type, list]) => (
                 <div key={type}>
                   <h3 className="text-sm font-bold text-gray-400 mb-3 uppercase tracking-wider">{typeLabels[type] || type}</h3>
                   <div className="grid grid-cols-3 gap-3">
@@ -2197,13 +3103,7 @@ export default function Home() {
           )}
           
           {(gamePhase==='firstNight'||gamePhase==='night') && nightInfo ? (
-            <div className="space-y-4 animate-fade-in">
-              <div className="text-center mb-3">
-                <h2 className={`text-3xl font-bold ${typeColors[nightInfo.effectiveRole.type].split(' ')[0]}`}>
-                  {nightInfo.effectiveRole.name}
-                </h2>
-                <p className="text-gray-400 mt-1 text-base">{nightInfo.seat.id+1}号</p>
-              </div>
+            <div className="space-y-4 animate-fade-in mt-10">
               <div className={`p-4 rounded-xl border-2 ${
                 currentHint.isPoisoned?'bg-red-900/20 border-red-500':'bg-gray-800 border-gray-600'
               }`}>
@@ -2306,7 +3206,7 @@ export default function Home() {
                 </div>
               )}
             </div>
-          ) : ((gamePhase==='firstNight'||gamePhase==='night') && (
+          ) : ((gamePhase==='firstNight'||gamePhase==='night') && !nightInfo && (
             <div className="text-center text-gray-500 mt-20 text-xl">正在计算行动...</div>
           ))}
           
@@ -2683,7 +3583,7 @@ export default function Home() {
       {showReviewModal && (
         <div className="fixed inset-0 z-[5000] bg-black/95 flex flex-col p-10 overflow-auto">
           <div className="flex justify-between items-center mb-6">
-            <h2 className="text-4xl">📜 对局复盘</h2>
+              <h2 className="text-4xl">📜 对局复盘</h2>
             <button 
               onClick={()=>setShowReviewModal(false)} 
               className="px-6 py-2 bg-gray-700 hover:bg-gray-600 rounded text-lg"
@@ -2782,6 +3682,160 @@ export default function Home() {
                 )}
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {showGameRecordsModal && (
+        <div className="fixed inset-0 z-[5000] bg-black/95 flex flex-col p-10 overflow-auto">
+          <div className="flex justify-between items-center mb-6">
+            <h2 className="text-4xl">📚 对局记录</h2>
+            <button 
+              onClick={()=>setShowGameRecordsModal(false)} 
+              className="px-6 py-2 bg-gray-700 hover:bg-gray-600 rounded text-lg"
+            >
+              关闭
+            </button>
+          </div>
+          <div className="space-y-4 max-h-[calc(100vh-8rem)] overflow-y-auto">
+            {gameRecords.length === 0 ? (
+              <div className="text-center text-gray-500 py-20">
+                <p className="text-2xl mb-4">暂无对局记录</p>
+                <p className="text-sm">完成游戏后，记录会自动保存到这里</p>
+              </div>
+            ) : (
+              gameRecords.map((record) => {
+                const startDate = new Date(record.startTime);
+                const endDate = new Date(record.endTime);
+                const startTimeStr = startDate.toLocaleString('zh-CN', {
+                  year: 'numeric',
+                  month: '2-digit',
+                  day: '2-digit',
+                  hour: '2-digit',
+                  minute: '2-digit',
+                  hour12: false
+                });
+                const endTimeStr = endDate.toLocaleString('zh-CN', {
+                  year: 'numeric',
+                  month: '2-digit',
+                  day: '2-digit',
+                  hour: '2-digit',
+                  minute: '2-digit',
+                  hour12: false
+                });
+                const durationStr = formatTimer(record.duration);
+                
+                // 按阶段顺序组织日志
+                const phaseOrder: Record<string, number> = {
+                  'firstNight': 1,
+                  'night': 2,
+                  'day': 3,
+                  'dusk': 4
+                };
+                
+                const logsByDayAndPhase = record.gameLogs.reduce((acc, log) => {
+                  const key = `${log.day}_${log.phase}`;
+                  if (!acc[key]) acc[key] = [];
+                  acc[key].push(log);
+                  return acc;
+                }, {} as Record<string, LogEntry[]>);
+                
+                const sortedLogs = Object.entries(logsByDayAndPhase).sort((a, b) => {
+                  const [dayA, phaseA] = a[0].split('_');
+                  const [dayB, phaseB] = b[0].split('_');
+                  const dayNumA = parseInt(dayA);
+                  const dayNumB = parseInt(dayB);
+                  if (dayNumA !== dayNumB) return dayNumA - dayNumB;
+                  return (phaseOrder[phaseA] || 999) - (phaseOrder[phaseB] || 999);
+                });
+                
+                return (
+                  <div key={record.id} className="bg-gray-900/50 p-6 rounded-xl border border-gray-700">
+                    <div className="flex justify-between items-start mb-4">
+                      <div>
+                        <h3 className="text-2xl font-bold text-white mb-2">{record.scriptName}</h3>
+                        <div className="text-sm text-gray-400 space-y-1">
+                          <p>开始时间：{startTimeStr}</p>
+                          <p>结束时间：{endTimeStr}</p>
+                          <p>游戏时长：{durationStr}</p>
+                        </div>
+                      </div>
+                      <div className={`text-xl font-bold px-4 py-2 rounded ${
+                        record.winResult === 'good' 
+                          ? 'bg-blue-900/50 text-blue-400 border border-blue-500' 
+                          : record.winResult === 'evil'
+                          ? 'bg-red-900/50 text-red-400 border border-red-500'
+                          : 'bg-gray-700/50 text-gray-300 border border-gray-500'
+                      }`}>
+                        {record.winResult === 'good' 
+                          ? '🏆 善良阵营胜利' 
+                          : record.winResult === 'evil'
+                          ? '👿 邪恶阵营获胜'
+                          : '🔄 游戏未完成'}
+                      </div>
+                    </div>
+                    {record.winReason && (
+                      <p className="text-sm text-gray-300 mb-4">
+                        {record.winResult ? '胜利依据' : '结束原因'}：{record.winReason}
+                      </p>
+                    )}
+                    
+                    <div className="grid grid-cols-2 gap-6 mt-6">
+                      <div>
+                        <h4 className="text-purple-400 mb-3 font-bold border-b pb-2">📖 座位信息</h4>
+                        <div className="space-y-2 max-h-64 overflow-y-auto">
+                          {record.seats.filter(s=>s.role).map(s => (
+                            <div key={s.id} className="py-1 border-b border-gray-700 flex justify-between items-center text-sm">
+                              <span className="font-bold">{s.id+1}号</span>
+                              <div className="flex flex-col items-end">
+                                <span className={s.role?.type==='demon'?'text-red-500 font-bold':s.role?.type==='minion'?'text-orange-500':'text-blue-400'}>
+                                  {s.role?.name}
+                                  {s.role?.id==='drunk'&&` (伪:${s.charadeRole?.name})`}
+                                  {s.isRedHerring && ' [红罗刹]'}
+                                </span>
+                                {s.isDead && <span className="text-xs text-gray-500">💀 已死亡</span>}
+                                {s.isPoisoned && <span className="text-xs text-green-500">🧪 中毒</span>}
+                                {s.isProtected && <span className="text-xs text-blue-500">🛡️ 受保护</span>}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                      
+                      <div>
+                        <h4 className="text-yellow-400 mb-3 font-bold border-b pb-2">📋 操作记录</h4>
+                        <div className="space-y-3 max-h-64 overflow-y-auto">
+                          {sortedLogs.map(([key, logs]) => {
+                            const [day, phase] = key.split('_');
+                            const phaseName = 
+                              phase === 'firstNight' ? '第1夜' : 
+                              phase === 'night' ? `第${day}夜` :
+                              phase === 'day' ? `第${day}天` :
+                              phase === 'dusk' ? `第${day}天黄昏` : `第${day}轮`;
+                            
+                            return (
+                              <div key={key} className="bg-gray-800/50 p-2 rounded text-xs">
+                                <div className="text-yellow-300 font-bold mb-1">{phaseName}</div>
+                                <div className="space-y-1">
+                                  {logs.map((l, i) => (
+                                    <div key={i} className="text-gray-300 pl-2 text-xs">
+                                      {l.message}
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            );
+                          })}
+                          {record.gameLogs.length === 0 && (
+                            <div className="text-gray-500 text-center py-4 text-sm">暂无操作记录</div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })
+            )}
           </div>
         </div>
       )}
@@ -3029,6 +4083,30 @@ export default function Home() {
             >
               确认
             </button>
+          </div>
+        </div>
+      )}
+      
+      {/* 重开确认弹窗 */}
+      {showRestartConfirmModal && (
+        <div className="fixed inset-0 z-[5000] bg-black/80 flex items-center justify-center">
+          <div className="bg-gray-800 border-4 border-red-500 rounded-2xl p-8 max-w-md text-center">
+            <h2 className="text-4xl font-bold text-red-400 mb-6">🔄 确认重开</h2>
+            <p className="text-3xl font-bold text-white mb-8">确定重开游戏吗？</p>
+            <div className="flex gap-4 justify-center">
+              <button
+                onClick={() => setShowRestartConfirmModal(false)}
+                className="px-8 py-4 bg-gray-600 rounded-xl font-bold text-xl hover:bg-gray-700 transition-colors"
+              >
+                取消
+              </button>
+              <button
+                onClick={confirmRestart}
+                className="px-8 py-4 bg-red-600 rounded-xl font-bold text-xl hover:bg-red-700 transition-colors"
+              >
+                确认
+              </button>
+            </div>
           </div>
         </div>
       )}

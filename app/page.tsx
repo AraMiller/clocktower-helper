@@ -5044,15 +5044,18 @@ export default function Home() {
     // 如果无事发生，继续游戏流程
   };
 
-  const openContextMenuForSeat = (seatId: number, preferSeatCenter = false) => {
+  const openContextMenuForSeat = (seatId: number, anchorMode: 'seat' | 'center' = 'seat') => {
     const containerRect = seatContainerRef.current?.getBoundingClientRect();
     const seatRect = seatRefs.current[seatId]?.getBoundingClientRect();
-    // 默认使用点击位置，但触屏/竖屏时优先座位中心
-    let targetX = seatRect ? seatRect.left + seatRect.width / 2 : 0;
-    let targetY = seatRect ? seatRect.top + seatRect.height / 2 : 0;
-
-    if (!preferSeatCenter && containerRect) {
-      // 如果不强制中心，则保持当前位置（后续由调用方传入）
+    // 触屏/竖屏需求：强制圆桌范围内居中显示
+    let targetX = 0;
+    let targetY = 0;
+    if (anchorMode === 'center' && containerRect) {
+      targetX = containerRect.left + containerRect.width / 2;
+      targetY = containerRect.top + containerRect.height / 2;
+    } else {
+      targetX = seatRect ? seatRect.left + seatRect.width / 2 : 0;
+      targetY = seatRect ? seatRect.top + seatRect.height / 2 : 0;
     }
 
     if (containerRect) {
@@ -5072,8 +5075,13 @@ export default function Home() {
 
   const handleContextMenu = (e: React.MouseEvent, seatId: number) => { 
     e.preventDefault(); 
+    const seat = seats.find(s => s.id === seatId);
+    if (gamePhase === 'check' && seat?.role?.id === 'drunk') {
+      setShowDrunkModal(seatId);
+      return;
+    }
     if (isPortrait) {
-      openContextMenuForSeat(seatId, true);
+      openContextMenuForSeat(seatId, 'center');
     } else {
       setContextMenu({x:e.clientX,y:e.clientY,seatId}); 
     }
@@ -5093,9 +5101,14 @@ export default function Home() {
     longPressTriggeredRef.current.delete(seatId);
     // 获取触摸位置
     const touch = e.touches[0];
-    // 设置0.5秒后触发右键菜单
+    // 设置0.5秒后触发右键菜单/酒鬼伪装
     const timer = setTimeout(() => {
-      openContextMenuForSeat(seatId, true);
+      const seat = seats.find(s => s.id === seatId);
+      if (gamePhase === 'check' && seat?.role?.id === 'drunk') {
+        setShowDrunkModal(seatId);
+      } else {
+        openContextMenuForSeat(seatId, 'center');
+      }
       longPressTriggeredRef.current.add(seatId);
       longPressTimerRef.current.delete(seatId);
       setLongPressingSeats(prev => {
@@ -6463,7 +6476,7 @@ export default function Home() {
           )}
         </div>
         
-        <div className="p-4 border-t border-gray-700 bg-gray-900 flex gap-3 justify-center z-50">
+      <div className="p-4 border-t border-gray-700 bg-gray-900 flex gap-3 justify-center z-50">
           {gamePhase==='setup' && (
             <button 
               onClick={handlePreStartNight} 
@@ -6472,14 +6485,25 @@ export default function Home() {
               开始游戏 (首夜)
             </button>
           )}
-          {gamePhase==='check' && (
-            <button 
-              onClick={()=>startNight(true)} 
-              className="w-full py-3 bg-green-600 rounded-xl font-bold text-base shadow-xl"
-            >
-              确认无误，入夜
-            </button>
-          )}
+        {gamePhase==='check' && (() => {
+          const hasPendingDrunk = seats.some(s => s.role?.id === 'drunk' && !s.charadeRole);
+          return (
+            <div className="w-full flex flex-col gap-2">
+              <button 
+                onClick={()=>!hasPendingDrunk && startNight(true)} 
+                disabled={hasPendingDrunk}
+                className="w-full py-3 bg-green-600 rounded-xl font-bold text-base shadow-xl disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                确认无误，入夜
+              </button>
+              {hasPendingDrunk && (
+                <div className="text-center text-yellow-300 text-sm font-semibold">
+                  场上有酒鬼未选择伪装身份，请长按其座位选择后再入夜
+                </div>
+              )}
+            </div>
+          );
+        })()}
           {(gamePhase==='firstNight'||gamePhase==='night') && (
             <>
               <button 
@@ -6617,9 +6641,10 @@ export default function Home() {
       {/* Modals */}
       {showDrunkModal!==null && (
         <div className="fixed inset-0 z-[3000] bg-black/95 flex items-center justify-center">
-          <div className="bg-gray-800 p-8 rounded-2xl w-[800px] border-2 border-yellow-500">
-            <h2 className="mb-6 text-center text-3xl text-yellow-400">🍺 请为酒鬼选择伪装 (互斥)</h2>
-            <div className="grid grid-cols-4 gap-4">
+          <div className="bg-gray-800 p-8 rounded-2xl w-[800px] max-w-[95vw] border-2 border-yellow-500">
+            <h2 className="mb-4 text-center text-3xl text-yellow-400">🍺 酒鬼伪装身份</h2>
+            <p className="mb-4 text-center text-gray-300 text-sm">长按酒鬼座位后选择。只有确认伪装后才能进入下一步。</p>
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3 max-h-[60vh] overflow-y-auto">
               {groupedRoles['townsfolk'].map(r=>{
                 const isTaken=seats.some(s=>s.role?.id===r.id);
                 return (
@@ -6627,14 +6652,22 @@ export default function Home() {
                     key={r.id} 
                     onClick={()=>!isTaken && confirmDrunkCharade(r)} 
                     disabled={isTaken} 
-                    className={`p-4 border-2 rounded-xl text-lg font-bold ${
-                      isTaken?'opacity-20 cursor-not-allowed border-gray-700':'border-blue-500 hover:bg-blue-900'
+                    className={`p-3 border-2 rounded-xl text-base font-bold ${
+                      isTaken?'opacity-25 cursor-not-allowed border-gray-700 bg-gray-900':'border-blue-500 hover:bg-blue-900'
                     }`}
                   >
                     {r.name}
                   </button>
                 );
               })}
+            </div>
+            <div className="mt-6 flex justify-end gap-3">
+              <button 
+                onClick={()=>setShowDrunkModal(null)}
+                className="px-4 py-2 bg-gray-700 rounded-lg font-bold"
+              >
+                取消
+              </button>
             </div>
           </div>
         </div>

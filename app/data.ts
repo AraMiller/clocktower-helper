@@ -47,6 +47,7 @@ export interface Seat {
   charadeRole: Role | null;
   isDead: boolean;
   isEvilConverted?: boolean; // 通过灵言师等效果被转为邪恶
+  isGoodConverted?: boolean; // 特殊效果被转为善良（如舞蛇人命中恶魔）
   isDrunk: boolean;
   isPoisoned: boolean;
   isProtected: boolean;

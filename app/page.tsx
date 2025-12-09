@@ -297,6 +297,7 @@ const cleanseSeatStatuses = (seat: Seat, opts?: { keepDeathState?: boolean }): S
     isSentenced: false,
     hasAbilityEvenDead: false,
     isEvilConverted: false,
+    isGoodConverted: false,
     statusDetails: preservedDetails,
     statuses: preservedStatuses,
     isFirstDeathForZombuul: opts?.keepDeathState ? seat.isFirstDeathForZombuul : false,
@@ -469,6 +470,7 @@ const addDrunkMark = (
 // 判断玩家是否为邪恶阵营（真实阵营）
 const isEvil = (seat: Seat): boolean => {
   if (!seat.role) return false;
+  if (seat.isGoodConverted) return false;
   return seat.isEvilConverted === true ||
          seat.role.type === 'demon' || 
          seat.role.type === 'minion' || 
@@ -479,6 +481,7 @@ const isEvil = (seat: Seat): boolean => {
 // 判断玩家在胜负条件计算中是否属于邪恶阵营（仅计算爪牙和恶魔，隐士永远属于善良阵营）
 const isEvilForWinCondition = (seat: Seat): boolean => {
   if (!seat.role) return false;
+  if (seat.isGoodConverted) return false;
   return seat.isEvilConverted === true ||
          seat.role.type === 'demon' || 
          seat.role.type === 'minion' || 
@@ -489,7 +492,16 @@ const isGoodAlignment = (seat: Seat): boolean => {
   if (!seat.role) return false;
   const roleType = seat.role.type;
   if (seat.isEvilConverted) return false;
+  if (seat.isGoodConverted) return true;
   return roleType !== 'demon' && roleType !== 'minion' && !seat.isDemonSuccessor;
+};
+
+// 用于渲染的阵营颜色：优先考虑转换标记
+const getDisplayRoleType = (seat: Seat): string | null => {
+  if (!seat.role) return null;
+  if (seat.isEvilConverted) return 'demon';
+  if (seat.isGoodConverted) return 'townsfolk';
+  return seat.role.type;
 };
 
 const getAliveNeighbors = (allSeats: Seat[], targetId: number): Seat[] => {
@@ -1843,7 +1855,8 @@ export default function Home() {
   const [nominationMap, setNominationMap] = useState<Record<number, number>>({});
   const [showLunaticRpsModal, setShowLunaticRpsModal] = useState<{ targetId: number; nominatorId: number | null } | null>(null);
   const [balloonistKnownTypes, setBalloonistKnownTypes] = useState<Record<number, string[]>>({});
-  const [hadesiaPendingSelection, setHadesiaPendingSelection] = useState<number[]>([]);
+  // 哈迪寂亚：记录三名目标的生/死选择，默认“生”
+  const [hadesiaChoices, setHadesiaChoices] = useState<Record<number, 'live' | 'die'>>({});
   const [showRoleSelectModal, setShowRoleSelectModal] = useState<{
     type: 'philosopher' | 'cerenovus' | 'pit_hag';
     targetId: number;
@@ -3118,7 +3131,7 @@ export default function Home() {
           
           setSeats(p => p.map(s => {
             if (s.id === snakeCharmerSeat.id) {
-              return { ...s, role: demonRole, isDemonSuccessor: targetSeat.isDemonSuccessor };
+              return { ...s, role: demonRole, isDemonSuccessor: targetSeat.isDemonSuccessor, isEvilConverted: true, isGoodConverted: false };
             } else if (s.id === targetSeat.id) {
               // 旧恶魔（新舞蛇人）：永久中毒，使用 statusDetails 标记
               const { statusDetails, statuses } = addPoisonMark(s, 'snake_charmer', '永久');
@@ -3127,6 +3140,8 @@ export default function Home() {
                 role: snakeCharmerRole, 
                 isPoisoned: true, 
                 isDemonSuccessor: false,
+                isGoodConverted: true,
+                isEvilConverted: false,
                 statusDetails,
                 statuses
               };
@@ -3137,7 +3152,7 @@ export default function Home() {
           setGameLogs(prev => [...prev, { 
             day: nightCount, 
             phase: gamePhase, 
-            message: `${snakeCharmerSeat.id+1}号(舞蛇人) 选择 ${targetSeat.id+1}号，交换角色和阵营，${targetSeat.id+1}号中毒` 
+            message: `${snakeCharmerSeat.id+1}号(舞蛇人) 选择 ${targetSeat.id+1}号，交换角色和阵营，${targetSeat.id+1}号中毒（舞蛇人转邪，恶魔转善）` 
           }]);
         } else {
           // 没有选中恶魔，只记录选择
@@ -3280,7 +3295,9 @@ export default function Home() {
       }
       if(action === 'kill' && nightInfo.effectiveRole.id === 'hadesia' && gamePhase !== 'firstNight' && newT.length === 3) {
         // 哈迪寂亚：选择3名玩家后弹窗确认，允许说书人决定谁会死亡
-        setHadesiaPendingSelection(newT);
+        const initChoices: Record<number, 'live' | 'die'> = {};
+        newT.forEach(id => { initChoices[id] = 'live'; });
+        setHadesiaChoices(initChoices);
         setShowHadesiaKillConfirmModal(newT);
         return;
       }
@@ -4348,32 +4365,29 @@ export default function Home() {
     continueToNextAction();
   };
 
-  // 哈迪寂亚：选择三人后，决定实际处决名单
-  const toggleHadesiaSelection = (id: number) => {
-    setHadesiaPendingSelection(prev => prev.includes(id) ? prev.filter(x=>x!==id) : [...prev, id]);
+  // 哈迪寂亚：设置单个玩家的命运（生/死）
+  const setHadesiaChoice = (id: number, choice: 'live' | 'die') => {
+    setHadesiaChoices(prev => ({ ...prev, [id]: choice }));
   };
 
   const confirmHadesia = () => {
     if (!nightInfo || !showHadesiaKillConfirmModal) return;
     const baseTargets = showHadesiaKillConfirmModal;
-    const targets = hadesiaPendingSelection;
     const demonName = getDemonDisplayName(nightInfo.effectiveRole.id, nightInfo.effectiveRole.name);
-    const baseSeats = baseTargets.map(id => seats.find(s => s.id === id)).filter(Boolean) as Seat[];
-    const allBaseAlive = baseSeats.length === 3 && baseSeats.every(s => !s.isDead);
-    const selectedSeats = targets.map(id => seats.find(s => s.id === id)).filter(Boolean) as Seat[];
-    const selectedAlive = selectedSeats.filter(s => !s.isDead);
-    // 规则：三人都存活则三人必死（强制全部死亡，不允许只杀部分）
-    let finalTargets = targets;
-    if (allBaseAlive) {
-      // 强制全部死亡，不允许手动选择
-      finalTargets = baseTargets;
-    } else {
-      const aliveInBase = baseSeats.filter(s => !s.isDead);
-      if (aliveInBase.length > 0 && selectedAlive.length === 0) {
-        alert('至少处决一名仍然存活的目标。');
-        return;
-      }
+    const choiceMap = baseTargets.reduce<Record<number, 'live' | 'die'>>((acc, id) => {
+      acc[id] = hadesiaChoices[id] || 'live';
+      return acc;
+    }, {});
+
+    const allChooseLive = baseTargets.every(id => choiceMap[id] === 'live');
+    const finalTargets = allChooseLive ? baseTargets : baseTargets.filter(id => choiceMap[id] === 'die');
+
+    const choiceDesc = baseTargets.map(id => `[${id+1}号:${choiceMap[id] === 'die' ? '死' : '生'}]`).join('、');
+    addLog(`${nightInfo.seat.id+1}号(${demonName}) 选择了 ${choiceDesc}`);
+    if (allChooseLive) {
+      addLog(`三名玩家都选择“生”，按规则三人全部死亡`);
     }
+
     finalTargets.forEach((tid, idx) => {
       const isLast = idx === finalTargets.length - 1;
       killPlayer(tid, {
@@ -4388,7 +4402,7 @@ export default function Home() {
     });
     setShowHadesiaKillConfirmModal(null);
     setSelectedActionTargets([]);
-    setHadesiaPendingSelection([]);
+    setHadesiaChoices({});
   };
 
   const executePlayer = (id: number, options?: { skipLunaticRps?: boolean }) => {
@@ -5560,6 +5574,9 @@ export default function Home() {
 
   // --- Render ---
   if (!mounted) return null;
+
+  // 人数小于等于 9 时放大座位及文字
+  const seatScale = seats.length <= 9 ? 1.3 : 1;
   return (
     <div 
       className={`flex ${isPortrait ? 'flex-col' : 'flex-row'} ${isPortrait ? 'min-h-screen' : 'h-screen'} text-white ${isPortrait ? 'overflow-y-auto' : 'overflow-hidden'} relative ${
@@ -5626,7 +5643,16 @@ export default function Home() {
         <div className={`relative ${isPortrait ? 'w-[80vw] h-[95vw] max-w-[85vw] max-h-[100vw] mt-16' : 'w-[70vmin] h-[70vmin]'}`}>
               {seats.map((s,i)=>{
             const p=getSeatPosition(i, seats.length, isPortrait);
-            const colorClass = s.role ? typeColors[s.role.type] : 'border-gray-600 text-gray-400';
+            const displayType = getDisplayRoleType(s);
+            const colorClass = displayType ? typeColors[displayType] : 'border-gray-600 text-gray-400';
+            const shouldEnlargeSeats = seats.length <= 9;
+            const seatScale = shouldEnlargeSeats ? 1.3 : 1;
+            const roleName =
+              s.role?.id==='drunk'
+                ? `${s.charadeRole?.name || s.role?.name} (酒)`
+                : s.isDemonSuccessor && s.role?.id === 'imp'
+                  ? `${s.role?.name} (传)`
+                  : s.role?.name||"空";
             return (
               <div 
                 key={s.id} 
@@ -5635,15 +5661,24 @@ export default function Home() {
                 onTouchStart={(e)=>handleTouchStart(e,s.id)}
                 onTouchEnd={(e)=>handleTouchEnd(e,s.id)}
                 onTouchMove={(e)=>handleTouchMove(e,s.id)}
-                  style={{left:`${p.x}%`,top:`${p.y}%`,transform:'translate(-50%,-50%)'}} 
-                className={`absolute ${isPortrait ? 'w-12 h-12' : 'w-24 h-24'} rounded-full ${isPortrait ? 'border-2' : 'border-4'} flex items-center justify-center cursor-pointer z-30 bg-gray-900 transition-all duration-300
+                  style={{
+                    left:`${p.x}%`,
+                    top:`${p.y}%`,
+                    transform:'translate(-50%,-50%)',
+                    width: `calc(${isPortrait ? '3rem' : '6rem'} * ${seatScale})`,
+                    height: `calc(${isPortrait ? '3rem' : '6rem'} * ${seatScale})`,
+                  }} 
+                className="absolute flex items-center justify-center"
+              >
+                <div
+                  className={`relative w-full h-full rounded-full ${isPortrait ? 'border-2' : 'border-4'} flex items-center justify-center cursor-pointer z-30 bg-gray-900 transition-all duration-300
                   ${colorClass} 
                   ${nightInfo?.seat.id===s.id?'ring-4 ring-yellow-400 scale-110 shadow-[0_0_30px_yellow]':''} 
                   ${s.isDead?'grayscale opacity-60':''} 
                   ${selectedActionTargets.includes(s.id)?'ring-4 ring-green-500 scale-105':''}
                   ${longPressingSeats.has(s.id)?'ring-4 ring-blue-400 animate-pulse':''}
                 `}
-              >
+                >
                 {/* 长按进度指示器 */}
                 {longPressingSeats.has(s.id) && (
                   <div className="absolute inset-0 rounded-full border-4 border-blue-400 animate-ping opacity-75"></div>
@@ -5654,10 +5689,11 @@ export default function Home() {
                   </div>
                 
                 {/* 角色名称 */}
-                <span className={`${isPortrait ? 'text-[8px]' : 'text-sm'} font-bold text-center leading-tight px-1`}>
-                  {s.role?.id==='drunk'?`${s.charadeRole?.name || s.role?.name}\n(酒)`:
-                   s.isDemonSuccessor && s.role?.id === 'imp'?`${s.role?.name}\n(传)`:
-                   s.role?.name||"空"}
+                <span 
+                  className="font-bold text-center leading-tight px-1 whitespace-nowrap"
+                  style={{ fontSize: `${(isPortrait ? 8 : 14) * seatScale}px` }}
+                >
+                  {roleName}
                 </span>
                 
                 {/* 状态图标 - 底部 */}
@@ -5667,21 +5703,24 @@ export default function Home() {
                   {s.isRedHerring&&<span className={isPortrait ? 'text-xs' : 'text-lg'}>😈</span>}
                 </div>
                 {/* 状态徽标 - 内环底部 */}
-                <div className={`absolute inset-x-0.5 ${isPortrait ? 'bottom-0.5' : 'bottom-2'} flex flex-wrap gap-0.5 justify-center ${isPortrait ? 'text-[6px]' : 'text-[10px]'} leading-tight`}>
+                <div 
+                  className={`absolute inset-x-0.5 ${isPortrait ? 'bottom-0.5' : 'bottom-2'} flex flex-wrap gap-0.5 justify-center leading-tight text-center`}
+                  style={{ fontSize: `${(isPortrait ? 6 : 10) * seatScale}px` }}
+                >
                   {(s.statusDetails || []).map(st => (
-                    <span key={st} className={`px-2 py-0.5 rounded-full bg-gray-800/90 border border-gray-600 text-yellow-200 ${st.includes('投毒') ? 'whitespace-nowrap' : ''}`}>{st}</span>
+                    <span key={st} className="px-2 py-0.5 rounded-full bg-gray-800/90 border border-gray-600 text-yellow-200 whitespace-nowrap text-center">{st}</span>
                   ))}
                   {s.hasUsedSlayerAbility && (
-                    <span className="px-2 py-0.5 rounded-full bg-red-900/70 border border-red-700 text-red-100">猎手已用</span>
+                    <span className="px-2 py-0.5 rounded-full bg-red-900/70 border border-red-700 text-red-100 whitespace-nowrap text-center">猎手已用</span>
                   )}
                   {s.hasUsedVirginAbility && (
-                    <span className="px-2 py-0.5 rounded-full bg-purple-900/70 border border-purple-700 text-purple-100">处女失效</span>
+                    <span className="px-2 py-0.5 rounded-full bg-purple-900/70 border border-purple-700 text-purple-100 whitespace-nowrap text-center">处女失效</span>
                   )}
                   {s.hasAbilityEvenDead && (
-                    <span className="px-2 py-0.5 rounded-full bg-green-900/70 border border-green-700 text-green-100">死而有能</span>
+                    <span className="px-2 py-0.5 rounded-full bg-green-900/70 border border-green-700 text-green-100 whitespace-nowrap text-center">死而有能</span>
                   )}
                   {s.isDemonSuccessor && (
-                    <span className="px-2 py-0.5 rounded-full bg-red-800/80 border border-red-700 text-white">恶魔（传）</span>
+                    <span className="px-2 py-0.5 rounded-full bg-red-800/80 border border-red-700 text-white whitespace-nowrap text-center">恶魔（传）</span>
                   )}
                 </div>
                 
@@ -5699,6 +5738,7 @@ export default function Home() {
                       ⚖️{s.voteCount}
                     </span>
                   )}
+                </div>
                 </div>
               </div>
             );
@@ -7712,7 +7752,9 @@ export default function Home() {
         <div className="fixed inset-0 z-[5000] bg-black/80 flex items-center justify-center px-4">
           <div className="bg-gray-800 border-4 border-green-500 rounded-2xl p-6 max-w-xl w-full space-y-4">
             <h2 className="text-3xl font-bold text-green-300">巡山人：为落难少女选择新镇民</h2>
-            <div className="text-gray-200 mb-2">目标：{showRangerModal.targetId+1}号(落难少女)</div>
+            <div className="text-gray-200 mb-2">
+              目标：{showRangerModal.targetId+1}号(落难少女) — 必须为其选择当前剧本的镇民角色（已在场镇民不可选，不可取消）
+            </div>
             <select
               className="w-full bg-gray-900 border border-gray-600 rounded p-2"
               value={showRangerModal.roleId ?? ''}
@@ -7721,18 +7763,44 @@ export default function Home() {
               <option value="">选择不在场的镇民角色</option>
               {(() => {
                 const usedRoleIds = new Set(seats.map(s => getSeatRoleId(s)).filter(Boolean) as string[]);
-                return roles
+                const townsfolk = roles
                   .filter(r => r.type === 'townsfolk')
-                  .filter(r => !usedRoleIds.has(r.id))
-                  .map(r => <option key={r.id} value={r.id}>{r.name}</option>);
+                  .filter(r => {
+                    if (!selectedScript) return true;
+                    return (
+                      r.script === selectedScript.name ||
+                      (selectedScript.id === 'trouble_brewing' && !r.script) ||
+                      (selectedScript.id === 'bad_moon_rising' && (!r.script || r.script === '暗月初升')) ||
+                      (selectedScript.id === 'sects_and_violets' && (!r.script || r.script === '梦陨春宵')) ||
+                      (selectedScript.id === 'midnight_revelry' && (!r.script || r.script === '夜半狂欢'))
+                    );
+                  });
+                return townsfolk.map(r => {
+                  const disabled = usedRoleIds.has(r.id);
+                  return (
+                    <option
+                      key={r.id}
+                      value={r.id}
+                      disabled={disabled}
+                      className={disabled ? 'text-gray-400' : ''}
+                    >
+                      {r.name}{disabled ? '（已在场）' : ''}
+                    </option>
+                  );
+                });
               })()}
             </select>
             <div className="flex gap-3 justify-end">
-              <button className="px-4 py-2 bg-gray-700 rounded" onClick={()=>{setShowRangerModal(null); continueToNextAction();}}>取消</button>
-              <button className="px-4 py-2 bg-green-600 rounded" onClick={()=>{
-                if (!showRangerModal?.roleId) return;
+              <button className="px-4 py-2 bg-green-600 rounded font-bold" onClick={()=>{
+                if (!showRangerModal?.roleId) {
+                  alert('必须选择一个未在场的镇民角色');
+                  return;
+                }
                 const newRole = roles.find(r => r.id === showRangerModal.roleId && r.type === 'townsfolk');
-                if (!newRole) return;
+                if (!newRole) {
+                  alert('角色无效，请重新选择');
+                  return;
+                }
                 const targetId = showRangerModal.targetId;
                 setSeats(prev => prev.map(s => {
                   if (s.id !== targetId) return s;
@@ -7748,7 +7816,7 @@ export default function Home() {
                 insertIntoWakeQueueAfterCurrent(showRangerModal.targetId, { roleOverride: newRole, logLabel: `${showRangerModal.targetId+1}号(${newRole.name})` });
                 setShowRangerModal(null);
                 continueToNextAction();
-              }}>确认变更</button>
+              }}>确定</button>
             </div>
           </div>
         </div>
@@ -7911,43 +7979,53 @@ export default function Home() {
       {/* 哈迪寂亚选择三人并决定处决 */}
       {showHadesiaKillConfirmModal && (() => {
         const baseSeats = showHadesiaKillConfirmModal.map(id => seats.find(s => s.id === id)).filter(Boolean) as Seat[];
-        const allBaseAlive = baseSeats.length === 3 && baseSeats.every(s => !s.isDead);
         return (
           <div className="fixed inset-0 z-[5000] bg-black/80 flex items-center justify-center px-4">
-            <div className="bg-gray-800 border-4 border-red-500 rounded-2xl p-6 max-w-xl w-full space-y-4">
+            <div className="bg-gray-800 border-4 border-red-500 rounded-2xl p-6 max-w-3xl w-full space-y-4">
               <h2 className="text-3xl font-bold text-red-300">哈迪寂亚：决定命运</h2>
-              <div className="text-gray-200">本夜选择的三名玩家：</div>
-              <div className="grid grid-cols-3 gap-3">
+              <div className="text-gray-200">为三名玩家分别选择“生”或“死”。若三人都选“生”，则三人全部死亡。</div>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                 {showHadesiaKillConfirmModal.map(id => {
                   const seat = seats.find(s => s.id === id);
-                  const isAlive = seat && !seat.isDead;
+                  const choice = hadesiaChoices[id] || 'live';
                   return (
-                    <label key={id} className={`flex items-center gap-2 bg-gray-900 border border-gray-700 rounded px-2 py-1 ${allBaseAlive ? 'opacity-60' : ''}`}>
-                      <input
-                        type="checkbox"
-                        checked={allBaseAlive || hadesiaPendingSelection.includes(id)}
-                        onChange={()=>toggleHadesiaSelection(id)}
-                        disabled={allBaseAlive}
-                      />
-                      <span>[{id+1}] {seat?.role?.name || '未知'} {isAlive ? '✓' : '✗'}</span>
-                    </label>
+                    <div key={id} className="bg-gray-900 border border-gray-700 rounded px-3 py-2 space-y-2">
+                      <div className="flex items-center justify-between text-white font-bold">
+                        <span>[{id+1}] {seat?.role?.name || '未知'}</span>
+                        {seat?.isDead ? <span className="text-red-300 text-xs">已死</span> : <span className="text-green-300 text-xs">存活</span>}
+                      </div>
+                      <div className="flex gap-3 text-sm text-white">
+                        <label className="flex items-center gap-1">
+                          <input
+                            type="radio"
+                            checked={choice === 'live'}
+                            onChange={()=>setHadesiaChoice(id, 'live')}
+                          />
+                          生
+                        </label>
+                        <label className="flex items-center gap-1">
+                          <input
+                            type="radio"
+                            checked={choice === 'die'}
+                            onChange={()=>setHadesiaChoice(id, 'die')}
+                          />
+                          死
+                        </label>
+                      </div>
+                    </div>
                   );
                 })}
               </div>
-              {allBaseAlive ? (
-                <div className="text-sm text-red-300 font-bold bg-red-900/30 p-3 rounded border border-red-500">
-                  三人全部存活，强制全部死亡（不可选择）
-                </div>
-              ) : (
-                <div className="text-xs text-gray-400">有存活者时至少勾选一人。</div>
-              )}
+              <div className="text-sm text-yellow-200 bg-yellow-900/30 p-3 rounded border border-yellow-600">
+                规则：如果三名玩家全部选择“生”，则三人全部死亡；否则仅选择“死”的玩家立即死亡。
+              </div>
               <div className="flex gap-3 justify-end">
                 <button className="px-4 py-2 bg-gray-700 rounded" onClick={()=>{
                   setShowHadesiaKillConfirmModal(null);
-                  setHadesiaPendingSelection([]);
+                  setHadesiaChoices({});
                   setSelectedActionTargets([]);
                 }}>取消</button>
-                <button className="px-4 py-2 bg-red-600 rounded font-bold" onClick={confirmHadesia}>确认处决</button>
+                <button className="px-4 py-2 bg-red-600 rounded font-bold" onClick={confirmHadesia}>确定</button>
               </div>
             </div>
           </div>

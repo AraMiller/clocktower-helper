@@ -5,6 +5,12 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "血染钟楼辅助工具",
   description: "血染钟楼桌游辅助工具 - 帮助您更好地进行游戏",
+  viewport: {
+    width: 'device-width',
+    initialScale: 1,
+    maximumScale: 5,
+    userScalable: true,
+  },
 };
 
 export default function RootLayout({

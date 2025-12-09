@@ -29,3 +29,42 @@ body {
 .animate-breath-shadow {
   animation: breath-shadow 2s ease-in-out infinite;
 }
+
+/* 核对身份页面滚动条美化 */
+.check-identity-scrollbar::-webkit-scrollbar {
+  width: 6px;
+}
+
+.check-identity-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+  border-left: 1px solid #eab308;
+  border-radius: 0;
+}
+
+.check-identity-scrollbar::-webkit-scrollbar-thumb {
+  background: linear-gradient(to bottom,
+    #eab308 0%,
+    #eab308 35%,
+    #ca8a04 35%,
+    #ca8a04 65%,
+    #eab308 65%,
+    #eab308 100%);
+  border-radius: 3px;
+  border: none;
+}
+
+.check-identity-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(to bottom,
+    #facc15 0%,
+    #facc15 35%,
+    #eab308 35%,
+    #eab308 65%,
+    #facc15 65%,
+    #facc15 100%);
+}
+
+/* Firefox 滚动条样式 */
+.check-identity-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: #eab308 transparent;
+}

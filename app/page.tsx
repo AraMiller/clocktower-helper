@@ -54,15 +54,41 @@ const formatTimer = (s: number) => {
   return `${m}:${sec}`;
 };
 
-const getSeatPosition = (index: number, total: number = 15) => {
+const getSeatPosition = (index: number, total: number = 15, isPortrait: boolean = false) => {
   const angle = (index / total) * 2 * Math.PI - Math.PI / 2;
-  // 增大半径，确保座位之间不重叠，不遮挡序号和状态标签
-  // 座位图标 w-24 h-24 (96px)，加上左上角序号标签和右上角状态标签的偏移
-  // 需要更大的半径来避免重叠
-  const radius = 55; // 增大半径，增加座位间距，避免遮挡
-  const x = 50 + radius * Math.cos(angle);
-  const y = 50 + radius * Math.sin(angle);
-  return { x: x.toFixed(2), y: y.toFixed(2) };
+  // 竖屏时使用椭圆形布局（垂直方向更长）
+  if (isPortrait) {
+    // 计算座位13（index=12）和座位14（index=13）之间的纵向距离作为基准
+    const seat13Index = 12; // 座位13（显示编号13，实际index是12）
+    const seat14Index = 13; // 座位14（显示编号14，实际index是13）
+    
+    const angle13 = (seat13Index / total) * 2 * Math.PI - Math.PI / 2;
+    const angle14 = (seat14Index / total) * 2 * Math.PI - Math.PI / 2;
+    
+    // 目标纵向距离：座位13和14之间的理想纵向间距（百分比）
+    // 这个值可以根据实际显示效果调整，增大=拉长椭圆，减小=压缩椭圆
+    const targetVerticalDistance = 3.5; // 目标纵向距离（百分比），可根据需要调整
+    
+    // 根据目标距离计算合适的radiusY
+    // 公式：distance = radiusY * |sin(angle14) - sin(angle13)|
+    // 所以：radiusY = distance / |sin(angle14) - sin(angle13)|
+    const sinDiff = Math.abs(Math.sin(angle14) - Math.sin(angle13));
+    const calculatedRadiusY = sinDiff > 0 ? targetVerticalDistance / sinDiff : 54;
+    
+    // 使用计算出的radiusY，但设置合理的范围限制
+    const radiusX = 44; // 水平半径保持不变
+    const radiusY = Math.max(45, Math.min(65, calculatedRadiusY)); // 限制在45-65之间，避免过大或过小
+    
+    const x = 50 + radiusX * Math.cos(angle);
+    const y = 50 + radiusY * Math.sin(angle);
+    return { x: x.toFixed(2), y: y.toFixed(2) };
+  } else {
+    // 横屏时使用圆形布局
+    const radius = 55; // 增大半径，增加座位间距，避免遮挡
+    const x = 50 + radius * Math.cos(angle);
+    const y = 50 + radius * Math.sin(angle);
+    return { x: x.toFixed(2), y: y.toFixed(2) };
+  }
 };
 
 const getRandom = <T,>(arr: T[]): T => arr[Math.floor(Math.random() * arr.length)];
@@ -285,19 +311,159 @@ const cleanseSeatStatuses = (seat: Seat, opts?: { keepDeathState?: boolean }): S
 const getPoisonSources = (seat: Seat) => {
   const details = seat.statusDetails || [];
   const statuses = seat.statuses || [];
+  // 检查所有带清除时间的中毒标记
+  const poisonPatterns = [
+    /永久中毒/,
+    /亡骨魔中毒（.*清除）/,
+    /普卡中毒（.*清除）/,
+    /投毒（.*清除）/,
+    /诺-达中毒（.*清除）/,
+    /食人族中毒（.*清除）/,
+    /舞蛇人中毒（.*清除）/
+  ];
+  const hasAnyPoisonMark = poisonPatterns.some(pattern => 
+    details.some(d => pattern.test(d))
+  );
   return {
-    permanent: details.includes('永久中毒'),
-    vigormortis: details.includes('亡骨魔中毒'),
-    pukka: details.includes('普卡中毒'),
-    dayPoison: details.includes('投毒（次日黄昏清除）'),
+    permanent: details.some(d => d.includes('永久中毒')),
+    vigormortis: details.some(d => d.includes('亡骨魔中毒')),
+    pukka: details.some(d => d.includes('普卡中毒')),
+    dayPoison: details.some(d => d.includes('投毒') && d.includes('清除')),
+    noDashii: details.some(d => d.includes('诺-达中毒')),
+    cannibal: details.some(d => d.includes('食人族中毒')),
+    snakeCharmer: details.some(d => d.includes('舞蛇人中毒')),
     statusPoison: statuses.some(st => st.effect === 'Poison' && st.duration !== 'expired'),
     direct: seat.isPoisoned,
+    anyMark: hasAnyPoisonMark,
   };
 };
 
 const computeIsPoisoned = (seat: Seat) => {
   const src = getPoisonSources(seat);
-  return src.permanent || src.vigormortis || src.pukka || src.dayPoison || src.statusPoison || src.direct;
+  return src.permanent || src.vigormortis || src.pukka || src.dayPoison || 
+         src.noDashii || src.cannibal || src.snakeCharmer || 
+         src.statusPoison || src.direct || src.anyMark;
+};
+
+// 统一添加中毒标记（带清除时间）
+const addPoisonMark = (
+  seat: Seat, 
+  poisonType: 'permanent' | 'vigormortis' | 'pukka' | 'poisoner' | 'poisoner_mr' | 'no_dashii' | 'cannibal' | 'snake_charmer',
+  clearTime: string
+): { statusDetails: string[], statuses: StatusEffect[] } => {
+  const details = seat.statusDetails || [];
+  const statuses = seat.statuses || [];
+  
+  let markText = '';
+  switch(poisonType) {
+    case 'permanent':
+      markText = '永久中毒';
+      break;
+    case 'vigormortis':
+      markText = `亡骨魔中毒（${clearTime}清除）`;
+      break;
+    case 'pukka':
+      markText = `普卡中毒（${clearTime}清除）`;
+      break;
+    case 'poisoner':
+      markText = `投毒（${clearTime}清除）`;
+      break;
+    case 'poisoner_mr':
+      markText = `投毒（${clearTime}清除）`;
+      break;
+    case 'no_dashii':
+      markText = `诺-达中毒（${clearTime}清除）`;
+      break;
+    case 'cannibal':
+      markText = `食人族中毒（${clearTime}清除）`;
+      break;
+    case 'snake_charmer':
+      markText = `舞蛇人中毒（永久）`;
+      break;
+  }
+  
+  // 移除同类型的旧标记，添加新标记
+  const filteredDetails = details.filter(d => {
+    if (poisonType === 'permanent' || poisonType === 'snake_charmer') {
+      return !d.includes('永久中毒') && !d.includes('舞蛇人中毒');
+    } else if (poisonType === 'vigormortis') {
+      return !d.includes('亡骨魔中毒');
+    } else if (poisonType === 'pukka') {
+      return !d.includes('普卡中毒');
+    } else if (poisonType === 'poisoner' || poisonType === 'poisoner_mr') {
+      return !d.includes('投毒');
+    } else if (poisonType === 'no_dashii') {
+      return !d.includes('诺-达中毒');
+    } else if (poisonType === 'cannibal') {
+      return !d.includes('食人族中毒');
+    }
+    return true;
+  });
+  
+  const newDetails = [...filteredDetails, markText];
+  const newStatuses = [...statuses, { effect: 'Poison', duration: clearTime }];
+  
+  return { statusDetails: newDetails, statuses: newStatuses };
+};
+
+// 统一添加酒鬼标记（带清除时间）
+const addDrunkMark = (
+  seat: Seat,
+  drunkType: 'sweetheart' | 'goon' | 'sailor' | 'innkeeper' | 'courtier' | 'philosopher' | 'minstrel',
+  clearTime: string
+): { statusDetails: string[], statuses: StatusEffect[] } => {
+  const details = seat.statusDetails || [];
+  const statuses = seat.statuses || [];
+  
+  let markText = '';
+  switch(drunkType) {
+    case 'sweetheart':
+      markText = `心上人致醉（${clearTime}清除）`;
+      break;
+    case 'goon':
+      markText = `莽夫使其醉酒（${clearTime}清除）`;
+      break;
+    case 'sailor':
+      markText = `水手致醉（${clearTime}清除）`;
+      break;
+    case 'innkeeper':
+      markText = `旅店老板致醉（${clearTime}清除）`;
+      break;
+    case 'courtier':
+      markText = `侍臣致醉（${clearTime}清除）`;
+      break;
+    case 'philosopher':
+      markText = `哲学家致醉（${clearTime}清除）`;
+      break;
+    case 'minstrel':
+      markText = `吟游诗人致醉（${clearTime}清除）`;
+      break;
+  }
+  
+  // 移除同类型的旧标记，添加新标记
+  const filteredDetails = details.filter(d => {
+    if (drunkType === 'sweetheart') {
+      return !d.includes('心上人致醉');
+    } else if (drunkType === 'goon') {
+      return !d.includes('莽夫使其醉酒');
+    } else if (drunkType === 'sailor') {
+      return !d.includes('水手致醉');
+    } else if (drunkType === 'innkeeper') {
+      return !d.includes('旅店老板致醉');
+    } else if (drunkType === 'courtier') {
+      return !d.includes('侍臣致醉');
+    } else if (drunkType === 'philosopher') {
+      return !d.includes('哲学家致醉');
+    } else if (drunkType === 'minstrel') {
+      return !d.includes('吟游诗人致醉');
+    }
+    return true;
+  });
+  
+  const newDetails = [...filteredDetails, markText];
+  const newStatuses = [...statuses, { effect: 'Drunk', duration: clearTime }];
+  
+  return { statusDetails: newDetails, statuses: newStatuses };
 };
 
 // 判断玩家是否为邪恶阵营（真实阵营）
@@ -374,8 +540,9 @@ const shouldShowFakeInfo = (
   if (forceFake) {
     return { showFake: true, isFirstTime: false };
   }
+  // 实时检测中毒和酒鬼状态
   const isDrunk = targetSeat.isDrunk || targetSeat.role?.id === "drunk";
-  const isPoisoned = targetSeat.isPoisoned;
+  const isPoisoned = computeIsPoisoned(targetSeat);
   
   if (isDrunk && !isPoisoned) {
     // 酒鬼状态：首次一定假，之后90%假，10%真
@@ -489,11 +656,29 @@ const calculateNightInfo = (
   if (!effectiveRole) return null;
   const diedTonight = deadThisNight.includes(targetSeat.id);
 
-  // 检查是否中毒：包括普通中毒、永久中毒（舞蛇人制造）、亡骨魔中毒、酒鬼状态
-  const hasPermanentPoison = targetSeat.statusDetails?.includes('永久中毒') || false;
-  const hasVigormortisPoison = targetSeat.statusDetails?.includes('亡骨魔中毒') || false;
-  const isPoisoned = targetSeat.isPoisoned || hasPermanentPoison || hasVigormortisPoison || targetSeat.isDrunk || targetSeat.role.id === "drunk";
-  const reason = hasPermanentPoison ? "永久中毒" : hasVigormortisPoison ? "亡骨魔中毒" : targetSeat.isPoisoned ? "中毒" : targetSeat.isDrunk ? "酒鬼" : "";
+  // 实时检查是否中毒：使用computeIsPoisoned函数统一计算所有中毒来源
+  const isPoisoned = computeIsPoisoned(targetSeat);
+  // 实时检查是否酒鬼：包括永久酒鬼角色和临时酒鬼状态
+  const isDrunk = targetSeat.isDrunk || targetSeat.role?.id === "drunk";
+  
+  // 确定中毒/酒鬼原因（用于日志显示）
+  const poisonSources = getPoisonSources(targetSeat);
+  let reason = "";
+  if (poisonSources.permanent || poisonSources.snakeCharmer) {
+    reason = "永久中毒";
+  } else if (poisonSources.vigormortis) {
+    reason = "亡骨魔中毒";
+  } else if (poisonSources.pukka) {
+    reason = "普卡中毒";
+  } else if (poisonSources.dayPoison || poisonSources.noDashii) {
+    reason = "投毒";
+  } else if (poisonSources.cannibal) {
+    reason = "食人族中毒";
+  } else if (isPoisoned) {
+    reason = "中毒";
+  } else if (isDrunk) {
+    reason = "酒鬼";
+  }
   
   // 判断是否应该显示假信息
   const fakeInfoCheck = drunkFirstInfoMap 
@@ -1546,6 +1731,7 @@ export default function Home() {
   // ===========================
   const [mounted, setMounted] = useState(false);
   const [showIntroLoading, setShowIntroLoading] = useState(true); // Intro 加载动画（不属于具体剧本）
+  const [isPortrait, setIsPortrait] = useState(false); // 是否为竖屏设备
   const [seats, setSeats] = useState<Seat[]>([]);
   const [initialSeats, setInitialSeats] = useState<Seat[]>([]);
   
@@ -1645,6 +1831,7 @@ export default function Home() {
   const [shamanConvertTarget, setShamanConvertTarget] = useState<number | null>(null);
   const [spyDisguiseMode, setSpyDisguiseMode] = useState<'off' | 'default' | 'on'>('default'); // 间谍伪装干扰模式：关闭干扰、默认、开启干扰
   const [spyDisguiseProbability, setSpyDisguiseProbability] = useState(0.8); // 间谍伪装干扰概率（默认80%）
+  const [showSpyDisguiseModal, setShowSpyDisguiseModal] = useState(false); // 伪装身份识别浮窗
   const [pukkaPoisonQueue, setPukkaPoisonQueue] = useState<{ targetId: number; nightsUntilDeath: number }[]>([]); // 普卡中毒->死亡队列
   const [autoRedHerringInfo, setAutoRedHerringInfo] = useState<string | null>(null); // 自动分配红罗刹结果提示
   const [dayAbilityLogs, setDayAbilityLogs] = useState<{ id: number; roleId: string; text: string; day: number }[]>([]);
@@ -1673,6 +1860,7 @@ export default function Home() {
   const seatsRef = useRef(seats);
   const fakeInspectionResultRef = useRef<string | null>(null);
   const consoleContentRef = useRef<HTMLDivElement>(null);
+  const currentActionTextRef = useRef<HTMLSpanElement>(null);
   const moonchildChainPendingRef = useRef(false);
   const longPressTimerRef = useRef<Map<number, NodeJS.Timeout>>(new Map()); // 存储每个座位的长按定时器
   const registrationCacheRef = useRef<Map<string, RegistrationResult>>(new Map()); // 同夜查验结果缓存
@@ -1925,6 +2113,27 @@ export default function Home() {
       resetRegistrationCache(`${gamePhase}-${nightCount}`);
     }
   }, [gamePhase, nightCount, resetRegistrationCache]);
+
+  // 检测设备方向和屏幕尺寸
+  useEffect(() => {
+    if (!mounted) return;
+    
+    const checkOrientation = () => {
+      // 检测是否为竖屏：高度大于宽度，或者使用媒体查询
+      const isPortraitMode = window.innerHeight > window.innerWidth || 
+                            window.matchMedia('(orientation: portrait)').matches;
+      setIsPortrait(isPortraitMode);
+    };
+    
+    checkOrientation();
+    window.addEventListener('resize', checkOrientation);
+    window.addEventListener('orientationchange', checkOrientation);
+    
+    return () => {
+      window.removeEventListener('resize', checkOrientation);
+      window.removeEventListener('orientationchange', checkOrientation);
+    };
+  }, [mounted]);
   
   useEffect(() => { 
     seatsRef.current = seats; 
@@ -2101,6 +2310,39 @@ export default function Home() {
     }
   }, [currentWakeIndex, gamePhase]);
 
+  // 动态调整"当前是X号X角色在行动"的字体大小，确保不超出容器
+  const adjustActionTextSize = useCallback(() => {
+    if (currentActionTextRef.current && nightInfo) {
+      const textElement = currentActionTextRef.current;
+      const container = textElement.parentElement;
+      if (!container) return;
+
+      // 重置字体大小
+      textElement.style.fontSize = '';
+      
+      // 获取容器宽度和文本宽度
+      const containerWidth = container.offsetWidth;
+      const textWidth = textElement.scrollWidth;
+      
+      // 如果文本超出容器，则缩小字体
+      if (textWidth > containerWidth) {
+        const baseFontSize = 30; // text-3xl 对应的大约30px
+        const scale = containerWidth / textWidth;
+        const newFontSize = Math.max(baseFontSize * scale * 0.95, 12); // 最小12px，留5%边距
+        textElement.style.fontSize = `${newFontSize}px`;
+      }
+    }
+  }, [nightInfo]);
+
+  useEffect(() => {
+    adjustActionTextSize();
+    // 窗口大小改变时重新计算
+    window.addEventListener('resize', adjustActionTextSize);
+    return () => {
+      window.removeEventListener('resize', adjustActionTextSize);
+    };
+  }, [adjustActionTextSize, currentWakeIndex]);
+
   // 组件卸载时清理所有长按定时器
   useEffect(() => {
     return () => {
@@ -2142,8 +2384,16 @@ export default function Home() {
 
   // 检查游戏结束条件
   const checkGameOver = useCallback((updatedSeats: Seat[], executedPlayerId?: number | null) => {
+    // 防御性检查：确保updatedSeats不为空且是有效数组
+    if (!updatedSeats || updatedSeats.length === 0) {
+      console.error('checkGameOver: updatedSeats为空或无效');
+      return false;
+    }
+    
     // 计算存活人数：僵怖假死状态（isFirstDeathForZombuul=true但isZombuulTrulyDead=false）应该被算作存活
     const aliveCount = updatedSeats.filter(s => {
+      // 确保seat对象有效
+      if (!s) return false;
       // 僵怖特殊处理：假死状态算作存活
       if (s.role?.id === 'zombuul' && s.isFirstDeathForZombuul && !s.isZombuulTrulyDead) {
         return true;
@@ -2388,7 +2638,9 @@ export default function Home() {
 
     setTimeout(() => {
         const withRed = [...updatedCompact];
-          if(!withRed.some(s => s.isRedHerring)) {
+          // 检查场上是否存在占卜师
+          const hasFortuneTeller = withRed.some(s => s.role?.id === "fortune_teller");
+          if(hasFortuneTeller && !withRed.some(s => s.isRedHerring)) {
             const good = withRed.filter(s => ["townsfolk","outsider"].includes(s.role?.type || ""));
             if(good.length > 0) {
               const t = getRandom(good);
@@ -2417,7 +2669,9 @@ export default function Home() {
         const active = updated.filter(s => s.role);
         const compact = active.map((s, i) => ({ ...s, id: i }));
         const withRed = [...compact];
-          if(!withRed.some(s => s.isRedHerring)) {
+          // 检查场上是否存在占卜师
+          const hasFortuneTeller = withRed.some(s => s.role?.id === "fortune_teller");
+          if(hasFortuneTeller && !withRed.some(s => s.isRedHerring)) {
             const good = withRed.filter(s => ["townsfolk","outsider"].includes(s.role?.type || ""));
             if(good.length > 0) {
               const t = getRandom(good);
@@ -2503,28 +2757,45 @@ export default function Home() {
     setPukkaPoisonQueue(nextPukkaQueue);
     
     setSeats(p => p.map(s => {
-      const hasSweetheartDrunk = s.statusDetails?.includes('心上人致醉（次日黄昏清除）') || false;
-      const hasGoonDrunk = s.statusDetails?.includes('莽夫使其醉酒（至下个黄昏）') || false;
-      const filteredStatuses = (s.statuses || []).filter(status => 
-        status.effect !== 'ExecutionProof' && 
-        status.duration !== '1 Day' &&
-        status.duration !== 'Night+Day'
+      // 清除所有带清除时间的标记（根据清除时间判断）
+      const filteredStatusDetails = (s.statusDetails || []).filter(st => {
+        // 保留永久标记
+        if (st.includes('永久中毒') || st.includes('永久')) return true;
+        // 清除所有带"次日黄昏清除"、"下个黄昏清除"、"至下个黄昏"的标记
+        if (st.includes('次日黄昏清除') || st.includes('下个黄昏清除') || st.includes('至下个黄昏')) return false;
+        // 保留其他标记（如"下一夜死亡时"、"下一个善良玩家被处决时"等特殊清除条件）
+        return true;
+      });
+      
+      const filteredStatuses = (s.statuses || []).filter(status => {
+        if (status.effect === 'ExecutionProof') return true;
+        // 清除所有带"Night+Day"、"1 Day"等标准清除时间的状态
+        if (status.duration === '1 Day' || status.duration === 'Night+Day') return false;
+        // 保留其他状态
+        return true;
+      });
+      
+      // 检查是否应该保留酒鬼状态（永久酒鬼角色或没有临时酒鬼标记）
+      const hasTemporaryDrunk = (s.statusDetails || []).some(d => 
+        d.includes('心上人致醉') || d.includes('莽夫使其醉酒') || 
+        d.includes('水手致醉') || d.includes('旅店老板致醉') || 
+        d.includes('侍臣致醉') || d.includes('哲学家致醉') || 
+        d.includes('吟游诗人致醉')
       );
-      const filteredStatusDetails = (s.statusDetails || []).filter(
-        st => st !== '投毒（次日黄昏清除）' && st !== '心上人致醉（次日黄昏清除）' && st !== '莽夫使其醉酒（至下个黄昏）'
-      );
-      const keepDrunk = s.role?.id === 'drunk' || (s.isDrunk && !hasSweetheartDrunk && !hasGoonDrunk);
+      const keepDrunk = s.role?.id === 'drunk' || (s.isDrunk && !hasTemporaryDrunk);
+      
       const poisonedAfterClean = computeIsPoisoned({
         ...s,
         statusDetails: filteredStatusDetails,
         statuses: filteredStatuses,
       });
+      
       return {
         ...s, 
         statuses: filteredStatuses,
         statusDetails: filteredStatusDetails,
         isPoisoned: poisonedAfterClean,
-        isDrunk: keepDrunk, // 心上人/莽夫致醉在夜晚开始时失效
+        isDrunk: keepDrunk,
         isProtected: false,
         protectedBy: null,
         voteCount: undefined, 
@@ -2692,11 +2963,14 @@ export default function Home() {
           });
           // 注意：保留永久中毒标记（舞蛇人制造）和亡骨魔中毒标记，同时保留既有的普卡中毒标记
           setSeats(p => p.map(s => {
-            const updatedStatusDetails = s.id === tid 
-              ? Array.from(new Set([...(s.statusDetails || []), '普卡中毒']))
-              : (s.statusDetails || []);
-            const nextSeat = { ...s, statusDetails: updatedStatusDetails };
-            return { ...nextSeat, isPoisoned: computeIsPoisoned(nextSeat) };
+            if (s.id === tid) {
+              // 普卡：当前夜晚中毒，下一夜死亡并恢复健康，所以清除时间是"下一夜死亡时"
+              const clearTime = '下一夜死亡时';
+              const { statusDetails, statuses } = addPoisonMark(s, 'pukka', clearTime);
+              const nextSeat = { ...s, statusDetails, statuses };
+              return { ...nextSeat, isPoisoned: computeIsPoisoned(nextSeat) };
+            }
+            return { ...s, isPoisoned: computeIsPoisoned(s) };
           }));
           if (nightInfo) {
             // 7. 行动日志去重：移除该玩家之前的操作记录，只保留最新的
@@ -2711,8 +2985,17 @@ export default function Home() {
           // 其他投毒者（投毒者、夜半狂欢投毒者）的正常处理
           // 注意：保留永久中毒标记（舞蛇人制造）和亡骨魔中毒标记
           setSeats(p => p.map(s => {
-            const nextSeat = s.id === tid ? { ...s, isPoisoned: true } : s;
-            return { ...nextSeat, isPoisoned: computeIsPoisoned(nextSeat) };
+            if (s.id === tid) {
+              // 投毒者：当晚和明天白天中毒，在次日黄昏清除
+              const clearTime = '次日黄昏';
+              const { statusDetails, statuses } = addPoisonMark(s, 
+                nightInfo.effectiveRole.id === 'poisoner_mr' ? 'poisoner_mr' : 'poisoner', 
+                clearTime
+              );
+              const nextSeat = { ...s, statusDetails, statuses };
+              return { ...nextSeat, isPoisoned: computeIsPoisoned(nextSeat) };
+            }
+            return { ...s, isPoisoned: computeIsPoisoned(s) };
           }));
           if (nightInfo) {
             // 7. 行动日志去重：移除该玩家之前的操作记录，只保留最新的
@@ -2775,9 +3058,9 @@ export default function Home() {
           const chooserId = nightInfo.seat.id;
           setSeats(p => p.map(s => {
             if (s.id === chooserId) {
-              const detail = '莽夫使其醉酒（至下个黄昏）';
-              const statusDetails = Array.from(new Set([...(s.statusDetails || []), detail]));
-              const statuses = [...(s.statuses || []), { effect: 'Drunk', duration: 'Night+Day', sourceId: targetSeat.id }];
+              // 莽夫：首个选择者醉酒至下个黄昏
+              const clearTime = '下个黄昏';
+              const { statusDetails, statuses } = addDrunkMark(s, 'goon', clearTime);
               return { ...s, isDrunk: true, statusDetails, statuses };
             }
             if (s.id === targetSeat.id) {
@@ -2838,14 +3121,14 @@ export default function Home() {
               return { ...s, role: demonRole, isDemonSuccessor: targetSeat.isDemonSuccessor };
             } else if (s.id === targetSeat.id) {
               // 旧恶魔（新舞蛇人）：永久中毒，使用 statusDetails 标记
-              const statusDetails = s.statusDetails || [];
-              const hasPermanentPoison = statusDetails.includes('永久中毒');
+              const { statusDetails, statuses } = addPoisonMark(s, 'snake_charmer', '永久');
               return { 
                 ...s, 
                 role: snakeCharmerRole, 
                 isPoisoned: true, 
                 isDemonSuccessor: false,
-                statusDetails: hasPermanentPoison ? statusDetails : [...statusDetails, '永久中毒']
+                statusDetails,
+                statuses
               };
             }
             return s;
@@ -2888,9 +3171,10 @@ export default function Home() {
                 return { ...s, role: targetRole };
               }
               if (s.role?.id === targetRole.id) {
-                const detail = '哲学家令其醉酒';
-                const statusDetails = Array.from(new Set([...(s.statusDetails || []), detail]));
-                return { ...s, isDrunk: true, statusDetails };
+                // 哲学家：原角色从当晚开始醉酒三天三夜
+                const clearTime = '三天三夜后';
+                const { statusDetails, statuses } = addDrunkMark(s, 'philosopher', clearTime);
+                return { ...s, isDrunk: true, statusDetails, statuses };
               }
               return s;
             }));
@@ -3500,19 +3784,83 @@ export default function Home() {
       }
 
       const finalize = (latestSeats?: Seat[]) => {
-        const seatsToUse = latestSeats || updatedSeats;
-        // 诺-达：杀人后邻近两名镇民中毒
+        // 使用最新的seats状态，优先使用传入的latestSeats，否则使用seatsRef.current，最后才使用updatedSeats
+        const seatsToUse = latestSeats || seatsRef.current || updatedSeats;
+        
+        // 防御性检查：确保seatsToUse不为空且是有效数组
+        if (!seatsToUse || seatsToUse.length === 0) {
+          console.error('killPlayer finalize: seatsToUse为空或无效，使用当前seats状态');
+          const fallbackSeats = seatsRef.current || seats;
+          if (!fallbackSeats || fallbackSeats.length === 0) {
+            console.error('killPlayer finalize: 所有seats状态都无效，跳过游戏结束检查');
+            onAfterKill?.(fallbackSeats);
+            return;
+          }
+          // 使用fallbackSeats继续执行
+          const finalSeats = fallbackSeats;
+          // 诺-达：杀人后邻近两名镇民中毒（永久，直到游戏结束）
+          if (killerRoleId === 'no_dashii') {
+            const neighbors = getAliveNeighbors(finalSeats, targetId).filter(s => s.role?.type === 'townsfolk');
+            const poisoned = neighbors.slice(0, 2);
+            if (poisoned.length > 0) {
+              setSeats(p => p.map(s => {
+                if (poisoned.some(pz => pz.id === s.id)) {
+                  // 诺-达中毒是永久的
+                  const clearTime = '永久';
+                  const { statusDetails, statuses } = addPoisonMark(s, 'no_dashii', clearTime);
+                  const nextSeat = { ...s, statusDetails, statuses };
+                  return { ...nextSeat, isPoisoned: computeIsPoisoned(nextSeat) };
+                }
+                return { ...s, isPoisoned: computeIsPoisoned(s) };
+              }));
+              addLog(`诺-达使 ${poisoned.map(p => `${p.id+1}号`).join('、')}号 中毒`);
+            }
+          }
+          // 方古：若杀死外来者且未转化过，则目标变恶魔，自己死亡
+          if (killerRoleId === 'fang_gu' && !fangGuConverted) {
+            const targetRole = targetSeat.role;
+            const isOutsider = targetRole?.type === 'outsider';
+            if (isOutsider) {
+              const fangGuRole = roles.find(r => r.id === 'fang_gu');
+              setSeats(p => p.map(s => {
+                if (s.id === targetId) {
+                  return cleanseSeatStatuses({ ...s, role: fangGuRole || s.role, isDemonSuccessor: false });
+                }
+                if (s.id === (nightInfo?.seat.id ?? -1)) {
+                  return { ...s, isDead: true };
+                }
+                return s;
+              }));
+              setFangGuConverted(true);
+              if (nightInfo?.seat.id !== undefined) {
+                addLog(`${nightInfo.seat.id+1}号(方古) 杀死外来者 ${targetId+1}号，目标转化为方古，原方古死亡`);
+              }
+              onAfterKill?.(finalSeats);
+              return;
+            }
+          }
+          if (!shouldSkipGameOver) {
+            moonchildChainPendingRef.current = false;
+            checkGameOver(finalSeats, executedPlayerId);
+          }
+          onAfterKill?.(finalSeats);
+          return;
+        }
+        
+        // 诺-达：杀人后邻近两名镇民中毒（永久，直到游戏结束）
         if (killerRoleId === 'no_dashii') {
           const neighbors = getAliveNeighbors(seatsToUse, targetId).filter(s => s.role?.type === 'townsfolk');
           const poisoned = neighbors.slice(0, 2);
           if (poisoned.length > 0) {
             setSeats(p => p.map(s => {
               if (poisoned.some(pz => pz.id === s.id)) {
-                const detail = '诺-达中毒';
-                const statusDetails = Array.from(new Set([...(s.statusDetails || []), detail]));
-                return { ...s, isPoisoned: true, statusDetails };
+                // 诺-达中毒是永久的
+                const clearTime = '永久';
+                const { statusDetails, statuses } = addPoisonMark(s, 'no_dashii', clearTime);
+                const nextSeat = { ...s, statusDetails, statuses };
+                return { ...nextSeat, isPoisoned: computeIsPoisoned(nextSeat) };
               }
-              return s;
+              return { ...s, isPoisoned: computeIsPoisoned(s) };
             }));
             addLog(`诺-达使 ${poisoned.map(p => `${p.id+1}号`).join('、')}号 中毒`);
           }
@@ -3672,13 +4020,13 @@ export default function Home() {
         if (poisonedNeighbor) {
           setSeats(p => p.map(s => {
             if (s.id === poisonedNeighbor.id) {
-              const statusDetails = [...(s.statusDetails || [])];
-              if (!statusDetails.includes('亡骨魔中毒')) {
-                statusDetails.push('亡骨魔中毒');
-              }
-              return { ...s, isPoisoned: true, statusDetails };
+              // 亡骨魔中毒是永久的
+              const clearTime = '永久';
+              const { statusDetails, statuses } = addPoisonMark(s, 'vigormortis', clearTime);
+              const nextSeat = { ...s, statusDetails, statuses };
+              return { ...nextSeat, isPoisoned: computeIsPoisoned(nextSeat) };
             }
-            return s;
+            return { ...s, isPoisoned: computeIsPoisoned(s) };
           }));
         }
 
@@ -3738,8 +4086,9 @@ export default function Home() {
         const newImp = getRandom(aliveMinions);
         const newImpRole = roles.find(r => r.id === 'imp');
         
+        let updatedSeats: Seat[] = [];
         setSeats(p => {
-          const updated = p.map(s => {
+          updatedSeats = p.map(s => {
             if (s.id === impSeat.id) {
               // 原小恶魔死亡
               return { ...s, isDead: true };
@@ -3759,10 +4108,15 @@ export default function Home() {
           // 从唤醒队列中移除已死亡的原小恶魔
           setWakeQueueIds(prev => prev.filter(id => id !== impSeat.id));
           
-          // 检查游戏结束（不应该结束，因为新小恶魔还在）
-          checkGameOver(updated);
-          return updated;
+          return updatedSeats;
         });
+        
+        // 检查游戏结束（不应该结束，因为新小恶魔还在）
+        // 使用setTimeout确保状态更新后再检查
+        setTimeout(() => {
+          const currentSeats = seatsRef.current || updatedSeats;
+          checkGameOver(currentSeats);
+        }, 0);
         
         // 记录原小恶魔的死亡
         setDeadThisNight(p => [...p, impSeat.id]);
@@ -3876,9 +4230,9 @@ export default function Home() {
 
     setSeats(prev => prev.map(s => {
       if (s.id !== targetId) return s;
-      const detail = '心上人致醉（次日黄昏清除）';
-      const statusDetails = Array.from(new Set([...(s.statusDetails || []), detail]));
-      const statuses = [...(s.statuses || []), { effect: 'Drunk', duration: 'Night+Day' }];
+      // 心上人：死亡时使一名玩家今晚至次日黄昏醉酒
+      const clearTime = '次日黄昏';
+      const { statusDetails, statuses } = addDrunkMark(s, 'sweetheart', clearTime);
       return { ...s, isDrunk: true, statusDetails, statuses };
     }));
     addLog(`${sourceId + 1}号(心上人) 死亡，使 ${targetId + 1}号 今晚至次日黄昏醉酒`);
@@ -3943,22 +4297,17 @@ export default function Home() {
     
     // 注意：保留永久中毒标记（舞蛇人制造）和亡骨魔中毒标记
     setSeats(p => p.map(s => {
-      const hasPermanentPoison = s.statusDetails?.includes('永久中毒') || false;
-      const hasVigormortisPoison = s.statusDetails?.includes('亡骨魔中毒') || false;
-      const addDayPoison = s.id === targetId;
-      const statusDetails = addDayPoison
-        ? Array.from(new Set([...(s.statusDetails || []), '投毒（次日黄昏清除）']))
-        : (s.statusDetails || []);
-      const statuses = addDayPoison
-        ? ([...(s.statuses || []), { effect: 'Poison', duration: 'Night+Day' }])
-        : (s.statuses || []);
-      const hasDayPoison = statusDetails.includes('投毒（次日黄昏清除）');
-      return {
-        ...s,
-        statusDetails,
-        statuses,
-        isPoisoned: addDayPoison || hasPermanentPoison || hasVigormortisPoison || hasDayPoison
-      };
+      if (s.id === targetId) {
+        // 投毒者：当晚和明天白天中毒，在次日黄昏清除
+        const clearTime = '次日黄昏';
+        const { statusDetails, statuses } = addPoisonMark(s, 
+          nightInfo.effectiveRole.id === 'poisoner_mr' ? 'poisoner_mr' : 'poisoner', 
+          clearTime
+        );
+        const nextSeat = { ...s, statusDetails, statuses };
+        return { ...nextSeat, isPoisoned: computeIsPoisoned(nextSeat) };
+      }
+      return { ...s, isPoisoned: computeIsPoisoned(s) };
     }));
     addLogWithDeduplication(
       `${nightInfo.seat.id+1}号(投毒者) 对 ${targetId+1}号 下毒`,
@@ -3977,22 +4326,17 @@ export default function Home() {
     
     // 注意：保留永久中毒标记（舞蛇人制造）和亡骨魔中毒标记
     setSeats(p => p.map(s => {
-      const hasPermanentPoison = s.statusDetails?.includes('永久中毒') || false;
-      const hasVigormortisPoison = s.statusDetails?.includes('亡骨魔中毒') || false;
-      const addDayPoison = s.id === targetId;
-      const statusDetails = addDayPoison
-        ? Array.from(new Set([...(s.statusDetails || []), '投毒（次日黄昏清除）']))
-        : (s.statusDetails || []);
-      const statuses = addDayPoison
-        ? ([...(s.statuses || []), { effect: 'Poison', duration: 'Night+Day' }])
-        : (s.statuses || []);
-      const hasDayPoison = statusDetails.includes('投毒（次日黄昏清除）');
-      return {
-        ...s,
-        statusDetails,
-        statuses,
-        isPoisoned: addDayPoison || hasPermanentPoison || hasVigormortisPoison || hasDayPoison
-      };
+      if (s.id === targetId) {
+        // 投毒者：当晚和明天白天中毒，在次日黄昏清除
+        const clearTime = '次日黄昏';
+        const { statusDetails, statuses } = addPoisonMark(s, 
+          nightInfo.effectiveRole.id === 'poisoner_mr' ? 'poisoner_mr' : 'poisoner', 
+          clearTime
+        );
+        const nextSeat = { ...s, statusDetails, statuses };
+        return { ...nextSeat, isPoisoned: computeIsPoisoned(nextSeat) };
+      }
+      return { ...s, isPoisoned: computeIsPoisoned(s) };
     }));
     addLogWithDeduplication(
       `${nightInfo.seat.id+1}号(投毒者) 对 ${targetId+1}号(队友) 下毒`,
@@ -4152,6 +4496,24 @@ export default function Home() {
         return;
       }
       
+      // 主谋特殊处理：如果主谋在游戏开始时存活，且恶魔在首夜被处决，邪恶阵营获胜
+      if (gamePhase === 'firstNight') {
+        const mastermind = seatsSnapshot.find(s => 
+          s.role?.id === 'mastermind' && !s.isDead
+        );
+        if (mastermind) {
+          setSeats(newSeats);
+          addLog(`${id+1}号 被处决`);
+          setExecutedPlayerId(id);
+          setCurrentDuskExecution(id);
+          setWinResult('evil');
+          setWinReason('主谋：恶魔在首夜被处决');
+          setGamePhase('gameOver');
+          addLog(`游戏结束：主谋在场，恶魔在首夜被处决，邪恶阵营获胜`);
+          return;
+        }
+      }
+      
       // 计算处决后的存活玩家数量
       const aliveCount = newSeats.filter(s => !s.isDead).length;
       
@@ -4229,18 +4591,36 @@ export default function Home() {
         if (s.id === cannibal.id) {
           // 检查是否有永久中毒（舞蛇人制造）或亡骨魔中毒
           // 这些永久中毒不能被食人族的能力清除
-          const hasPermanentPoison = s.statusDetails?.includes('永久中毒') || false;
-          const hasVigormortisPoison = s.statusDetails?.includes('亡骨魔中毒') || false;
+          const hasPermanentPoison = s.statusDetails?.some(d => d.includes('永久中毒')) || false;
+          const hasVigormortisPoison = s.statusDetails?.some(d => d.includes('亡骨魔中毒')) || false;
           // 如果被处决的是善良玩家，清除临时中毒（食人族能力造成的中毒）
           // 但必须保留永久中毒和亡骨魔中毒
           // 如果被处决的是邪恶玩家，设置临时中毒，但也要保留永久中毒
-          const shouldBePoisoned = isEvilExecuted || hasPermanentPoison || hasVigormortisPoison;
-          return { 
-            ...s, 
-            isPoisoned: shouldBePoisoned,
-            // 记录最后被处决的玩家ID，用于后续能力处理
-            masterId: id
-          };
+          if (isEvilExecuted) {
+            // 食人族中毒直到下一个善良玩家被处决
+            const clearTime = '下一个善良玩家被处决时';
+            const { statusDetails, statuses } = addPoisonMark(s, 'cannibal', clearTime);
+            const nextSeat = { ...s, statusDetails, statuses };
+            return { 
+              ...nextSeat, 
+              isPoisoned: computeIsPoisoned(nextSeat),
+              // 记录最后被处决的玩家ID，用于后续能力处理
+              masterId: id
+            };
+          } else {
+            // 清除食人族中毒，但保留永久中毒和亡骨魔中毒
+            const filteredDetails = (s.statusDetails || []).filter(d => !d.includes('食人族中毒'));
+            const filteredStatuses = (s.statuses || []).filter(st => 
+              !(st.effect === 'Poison' && s.statusDetails?.some(d => d.includes('食人族中毒')))
+            );
+            const nextSeat = { ...s, statusDetails: filteredDetails, statuses: filteredStatuses };
+            return { 
+              ...nextSeat, 
+              isPoisoned: computeIsPoisoned(nextSeat),
+              // 记录最后被处决的玩家ID，用于后续能力处理
+              masterId: id
+            };
+          }
         }
         return s;
       }));
@@ -4780,7 +5160,17 @@ export default function Home() {
     setSeats(p => {
       let updated;
       if (type === 'redherring') {
-        // 场上“红罗刹”唯一：选择新的红罗刹时，清除其他玩家的红罗刹标记和图标
+        // 检查场上是否存在占卜师
+        const hasFortuneTeller = p.some(s => s.role?.id === "fortune_teller");
+        const targetSeat = p.find(s => s.id === contextMenu.seatId);
+        const isRemoving = targetSeat?.isRedHerring === true;
+        
+        // 如果尝试添加红罗刹但场上没有占卜师，则不允许
+        if (!isRemoving && !hasFortuneTeller) {
+          return p; // 不进行任何更改
+        }
+        
+        // 场上"红罗刹"唯一：选择新的红罗刹时，清除其他玩家的红罗刹标记和图标
         updated = p.map(s => {
           if (s.id === contextMenu.seatId) {
             const details = s.statusDetails || [];
@@ -5172,7 +5562,7 @@ export default function Home() {
   if (!mounted) return null;
   return (
     <div 
-      className={`flex h-screen text-white overflow-hidden relative ${
+      className={`flex ${isPortrait ? 'flex-col' : 'flex-row'} ${isPortrait ? 'min-h-screen' : 'h-screen'} text-white ${isPortrait ? 'overflow-y-auto' : 'overflow-hidden'} relative ${
         gamePhase==='day'?'bg-sky-900':
         gamePhase==='dusk'?'bg-stone-900':
         'bg-gray-950'
@@ -5194,36 +5584,48 @@ export default function Home() {
         </div>
       )}
       {/* ===== 暗流涌动剧本（游戏第一部分）主界面 ===== */}
-      <div className="w-3/5 relative flex items-center justify-center border-r border-gray-700">
-        {/* 2. 万能上一步按钮 - 固定位置在左侧圆桌右上角 */}
+      <div className={`${isPortrait ? 'w-full order-2 border-t' : 'w-3/5 h-screen border-r'} relative flex items-center justify-center border-gray-700 ${isPortrait ? 'py-8 min-h-[70vh]' : ''}`}>
+        {/* 竖屏时，圆桌容器下移，为顶部按钮留出空间 */}
+        {isPortrait && <div className="absolute top-0 left-0 right-0 h-16"></div>}
+        {/* 2. 万能上一步按钮和伪装身份识别按钮 - 竖屏时移到顶部，避免与圆桌重叠 */}
         {/* 支持无限次撤回，直到"选择剧本"页面，在"选择剧本"页面无效 */}
         {gamePhase !== 'scriptSelection' && (
-          <button
-            onClick={handleGlobalUndo}
-            className="absolute top-4 right-4 z-50 px-4 py-2 bg-blue-600 rounded-xl font-bold text-sm shadow-lg hover:bg-blue-700 transition-colors"
-          >
-            <div className="flex flex-col items-center">
-              <div>⬅️ 万能上一步</div>
-              <div className="text-xs font-normal opacity-80">（撤销当前动作）</div>
-            </div>
-          </button>
+          <div className={`absolute ${isPortrait ? 'top-2 left-2 right-2 flex-row justify-end' : 'top-4 right-4 flex-col'} z-50 flex gap-2`}>
+            <button
+              onClick={handleGlobalUndo}
+              className={`${isPortrait ? 'px-3 py-1.5 text-xs' : 'px-4 py-2 text-sm'} bg-blue-600 rounded-xl font-bold shadow-lg hover:bg-blue-700 transition-colors`}
+            >
+              <div className={`flex ${isPortrait ? 'flex-row items-center gap-1' : 'flex-col items-center'}`}>
+                <div>⬅️ 万能上一步</div>
+                {!isPortrait && <div className="text-xs font-normal opacity-80">（撤销当前动作）</div>}
+              </div>
+            </button>
+            <button
+              onClick={() => setShowSpyDisguiseModal(true)}
+              className={`${isPortrait ? 'px-3 py-1.5 text-xs' : 'px-4 py-2 text-sm'} bg-purple-600 rounded-xl font-bold shadow-lg hover:bg-purple-700 transition-colors`}
+            >
+              <div className="flex items-center justify-center">
+                <div>🎭 伪装身份识别</div>
+              </div>
+            </button>
+          </div>
         )}
-        <div className="absolute pointer-events-none text-center z-0 top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2">
-          <div className="text-6xl font-bold opacity-50 mb-4">{phaseNames[gamePhase]}</div>
-          <div className="text-xs text-gray-500 opacity-40 mb-2">
+        <div className={`absolute pointer-events-none text-center z-0 ${isPortrait ? 'top-[calc(45%+3rem)]' : 'top-1/2'} left-1/2 -translate-x-1/2 -translate-y-1/2`}>
+          <div className={`${isPortrait ? 'text-xl' : 'text-6xl'} font-bold opacity-50 ${isPortrait ? 'mb-1' : 'mb-4'}`}>{phaseNames[gamePhase]}</div>
+          <div className={`${isPortrait ? 'text-[9px]' : 'text-xs'} text-gray-500 opacity-40 ${isPortrait ? 'mb-0.5' : 'mb-2'}`}>
             design by{" "}
             <span className="font-bold italic">Bai  Gan Group</span>
           </div>
           {gamePhase==='scriptSelection' && (
-            <div className="text-5xl font-mono text-yellow-300">请选择剧本</div>
+            <div className={`${isPortrait ? 'text-xl' : 'text-5xl'} font-mono text-yellow-300`}>请选择剧本</div>
           )}
           {gamePhase!=='setup' && gamePhase!=='scriptSelection' && (
-            <div className="text-5xl font-mono text-yellow-300">{formatTimer(timer)}</div>
+            <div className={`${isPortrait ? 'text-xl' : 'text-5xl'} font-mono text-yellow-300`}>{formatTimer(timer)}</div>
           )}
         </div>
-        <div className="relative w-[70vmin] h-[70vmin]">
+        <div className={`relative ${isPortrait ? 'w-[80vw] h-[95vw] max-w-[85vw] max-h-[100vw] mt-16' : 'w-[70vmin] h-[70vmin]'}`}>
               {seats.map((s,i)=>{
-            const p=getSeatPosition(i, seats.length);
+            const p=getSeatPosition(i, seats.length, isPortrait);
             const colorClass = s.role ? typeColors[s.role.type] : 'border-gray-600 text-gray-400';
             return (
               <div 
@@ -5234,7 +5636,7 @@ export default function Home() {
                 onTouchEnd={(e)=>handleTouchEnd(e,s.id)}
                 onTouchMove={(e)=>handleTouchMove(e,s.id)}
                   style={{left:`${p.x}%`,top:`${p.y}%`,transform:'translate(-50%,-50%)'}} 
-                className={`absolute w-24 h-24 rounded-full border-4 flex items-center justify-center cursor-pointer z-30 bg-gray-900 transition-all duration-300
+                className={`absolute ${isPortrait ? 'w-12 h-12' : 'w-24 h-24'} rounded-full ${isPortrait ? 'border-2' : 'border-4'} flex items-center justify-center cursor-pointer z-30 bg-gray-900 transition-all duration-300
                   ${colorClass} 
                   ${nightInfo?.seat.id===s.id?'ring-4 ring-yellow-400 scale-110 shadow-[0_0_30px_yellow]':''} 
                   ${s.isDead?'grayscale opacity-60':''} 
@@ -5247,27 +5649,27 @@ export default function Home() {
                   <div className="absolute inset-0 rounded-full border-4 border-blue-400 animate-ping opacity-75"></div>
                 )}
                 {/* 座位号 - 左上角 */}
-                <div className="absolute -top-5 -left-5 w-9 h-9 bg-gray-800 rounded-full border-2 border-gray-600 flex items-center justify-center text-base font-bold z-40">
+                <div className={`absolute ${isPortrait ? '-top-2 -left-2 w-5 h-5 text-[10px]' : '-top-5 -left-5 w-9 h-9 text-base'} bg-gray-800 rounded-full border-2 border-gray-600 flex items-center justify-center font-bold z-40`}>
                   {s.id+1}
                   </div>
                 
                 {/* 角色名称 */}
-                <span className="text-sm font-bold text-center leading-tight px-1">
+                <span className={`${isPortrait ? 'text-[8px]' : 'text-sm'} font-bold text-center leading-tight px-1`}>
                   {s.role?.id==='drunk'?`${s.charadeRole?.name || s.role?.name}\n(酒)`:
                    s.isDemonSuccessor && s.role?.id === 'imp'?`${s.role?.name}\n(传)`:
                    s.role?.name||"空"}
                 </span>
                 
                 {/* 状态图标 - 底部 */}
-                <div className="absolute -bottom-3 flex gap-1">
-                  {s.isPoisoned&&<span className="text-lg">🧪</span>}
-                  {s.isProtected&&<span className="text-lg">🛡️</span>}
-                  {s.isRedHerring&&<span className="text-lg">😈</span>}
+                <div className={`absolute ${isPortrait ? '-bottom-1.5' : '-bottom-3'} flex gap-0.5`}>
+                  {s.isPoisoned&&<span className={isPortrait ? 'text-xs' : 'text-lg'}>🧪</span>}
+                  {s.isProtected&&<span className={isPortrait ? 'text-xs' : 'text-lg'}>🛡️</span>}
+                  {s.isRedHerring&&<span className={isPortrait ? 'text-xs' : 'text-lg'}>😈</span>}
                 </div>
                 {/* 状态徽标 - 内环底部 */}
-                <div className="absolute inset-x-1 bottom-2 flex flex-wrap gap-1 justify-center text-[10px] leading-tight">
+                <div className={`absolute inset-x-0.5 ${isPortrait ? 'bottom-0.5' : 'bottom-2'} flex flex-wrap gap-0.5 justify-center ${isPortrait ? 'text-[6px]' : 'text-[10px]'} leading-tight`}>
                   {(s.statusDetails || []).map(st => (
-                    <span key={st} className="px-2 py-0.5 rounded-full bg-gray-800/90 border border-gray-600 text-yellow-200">{st}</span>
+                    <span key={st} className={`px-2 py-0.5 rounded-full bg-gray-800/90 border border-gray-600 text-yellow-200 ${st.includes('投毒') ? 'whitespace-nowrap' : ''}`}>{st}</span>
                   ))}
                   {s.hasUsedSlayerAbility && (
                     <span className="px-2 py-0.5 rounded-full bg-red-900/70 border border-red-700 text-red-100">猎手已用</span>
@@ -5284,16 +5686,16 @@ export default function Home() {
                 </div>
                 
                 {/* 右上角提示区域 */}
-                <div className="absolute -top-5 -right-5 flex flex-col gap-1 items-end z-40">
+                <div className={`absolute ${isPortrait ? '-top-1.5 -right-1.5' : '-top-5 -right-5'} flex flex-col gap-0.5 items-end z-40`}>
                   {/* 主人标签 */}
                   {seats.some(seat => seat.masterId === s.id) && (
-                    <span className="text-xs bg-purple-600 px-2 py-0.5 rounded-full shadow font-bold">
+                    <span className={`${isPortrait ? 'text-[7px] px-0.5 py-0.5' : 'text-xs px-2 py-0.5'} bg-purple-600 rounded-full shadow font-bold`}>
                       主人
                     </span>
                   )}
                   {/* 处决台标签 */}
                   {s.isCandidate && (
-                    <span className="text-xs bg-red-600 px-2 py-0.5 rounded-full shadow font-bold animate-pulse">
+                    <span className={`${isPortrait ? 'text-[7px] px-0.5 py-0.5' : 'text-xs px-2 py-0.5'} bg-red-600 rounded-full shadow font-bold animate-pulse`}>
                       ⚖️{s.voteCount}
                     </span>
                   )}
@@ -5304,30 +5706,30 @@ export default function Home() {
           </div>
       </div>
 
-      <div className={`w-2/5 flex flex-col border-l border-gray-800 z-40 transition-all duration-500 ${
+      <div className={`${isPortrait ? 'w-full order-1 border-b' : 'w-2/5 h-screen border-l'} flex flex-col border-gray-800 z-40 transition-all duration-500 ${
         gamePhase === 'scriptSelection' 
           ? 'bg-gray-800/90' 
           : 'bg-gray-900/95'
       }`}>
-        <div className="px-4 py-2 pb-4 border-b flex items-center justify-between relative">
-          <span className="font-bold text-purple-400 text-xl scale-[1.3] flex items-center justify-center h-8 flex-shrink-0">控制台</span>
-          <div className="flex items-center flex-shrink-0">
+        <div className={`px-4 ${isPortrait ? 'py-2 pb-3' : 'py-2 pb-4'} border-b flex items-center justify-between relative`}>
+          <span className={`font-bold text-purple-400 ${isPortrait ? 'text-lg' : 'text-xl scale-[1.3]'} flex items-center justify-center ${isPortrait ? 'h-7' : 'h-8'} flex-shrink-0`}>控制台</span>
+          <div className="flex items-center flex-shrink-0 gap-1">
             <button 
               onClick={()=>setShowGameRecordsModal(true)} 
-              className="px-2 py-1 bg-green-600 border rounded text-sm shadow-lg h-8 flex items-center justify-center scale-[1.3] flex-shrink-0 mr-[28px]"
+              className={`${isPortrait ? 'px-2 py-1 text-sm h-7' : 'px-2 py-1 text-sm h-8 scale-[1.3] mr-[28px]'} bg-green-600 border rounded shadow-lg flex items-center justify-center flex-shrink-0`}
             >
               对局记录
             </button>
             <button 
               onClick={()=>setShowReviewModal(true)} 
-              className="px-2 py-1 bg-indigo-600 border rounded text-sm shadow-lg h-8 flex items-center justify-center scale-[1.3] flex-shrink-0 mr-[22px]"
+              className={`${isPortrait ? 'px-2 py-1 text-sm h-7' : 'px-2 py-1 text-sm h-8 scale-[1.3] mr-[22px]'} bg-indigo-600 border rounded shadow-lg flex items-center justify-center flex-shrink-0`}
             >
               复盘
             </button>
             <div className="relative flex-shrink-0">
               <button 
                 onClick={(e)=>{e.stopPropagation();setShowMenu(!showMenu)}} 
-                className="px-2 py-1 bg-gray-800 border rounded text-sm shadow-lg h-8 flex items-center justify-center scale-[1.3]"
+                className={`${isPortrait ? 'px-2 py-1 text-sm h-7' : 'px-2 py-1 text-sm h-8 scale-[1.3]'} bg-gray-800 border rounded shadow-lg flex items-center justify-center`}
               >
                 ☰
               </button>
@@ -5356,12 +5758,16 @@ export default function Home() {
             </div>
           </div>
           {nightInfo && (
-            <span className="text-3xl font-bold text-white absolute left-1/2 -translate-x-1/2 top-full mt-2">
+            <span 
+              ref={currentActionTextRef}
+              className={`${isPortrait ? 'text-xl' : 'text-3xl'} font-bold text-white absolute left-1/2 -translate-x-1/2 top-full mt-2 whitespace-nowrap text-center overflow-hidden`}
+              style={{ maxWidth: '100%' }}
+            >
               当前是<span className="text-yellow-300">{nightInfo.seat.id+1}号{nightInfo.effectiveRole.name}</span>在行动
             </span>
           )}
         </div>
-          <div ref={consoleContentRef} className="flex-1 overflow-y-auto p-4 text-base">
+          <div ref={consoleContentRef} className={`flex-1 overflow-y-auto ${isPortrait ? 'p-3' : 'p-4'} ${isPortrait ? 'text-sm' : 'text-base'}`}>
           {/* 剧本选择页面 */}
           {gamePhase==='scriptSelection' && (
             <div className="flex flex-col items-center justify-center min-h-full">
@@ -5530,46 +5936,166 @@ export default function Home() {
             </div>
           )}
           {gamePhase==='setup' && (() => {
-            // 计算外来者数量
+            // 计算各阵营数量
             const playerCount = seats.filter(s => s.role !== null).length;
-            const expectedOutsiderCount = Math.floor(playerCount / 3);
+            const actualTownsfolkCount = seats.filter(s => s.role?.type === 'townsfolk').length;
             const actualOutsiderCount = seats.filter(s => s.role?.type === 'outsider').length;
+            const actualMinionCount = seats.filter(s => s.role?.type === 'minion').length;
+            const actualDemonCount = seats.filter(s => s.role?.type === 'demon').length;
+            
             // 检查影响外来者数量的角色
             const hasBaron = seats.some(s => s.role?.id === 'baron');
             const hasGodfather = seats.some(s => s.role?.id === 'godfather');
             const hasFangGu = seats.some(s => s.role?.id === 'fang_gu');
             const hasVigormortis = seats.some(s => s.role?.id === 'vigormortis' || s.role?.id === 'vigormortis_mr');
             const hasBalloonist = seats.some(s => s.role?.id === 'balloonist');
-            let modifier = 0;
-            if (hasBaron) modifier += 2;
-            if (hasGodfather) modifier += 0; // 教父是-1或+1，需要说书人决定
-            if (hasFangGu) modifier += 1;
-            if (hasVigormortis) modifier -= 1;
-            if (hasBalloonist) modifier += 1;
-            const adjustedExpected = expectedOutsiderCount + modifier;
-            const isValid = actualOutsiderCount === adjustedExpected || (hasGodfather && Math.abs(actualOutsiderCount - adjustedExpected) <= 1);
+            
+            // 基于"保持当前村民数量不变"计算建议
+            // 血染钟楼规则：
+            // - 外来者数 = floor(总玩家数 / 3) + 修正值
+            // - 爪牙数 = floor((总玩家数 - 3) / 2)
+            // - 恶魔数 = 1
+            // - 总玩家数 = 村民数 + 外来者数 + 爪牙数 + 恶魔数
+            
+            const calculateRecommendations = (townsfolkCount: number) => {
+              const recommendations: Array<{
+                outsider: number;
+                minion: number;
+                demon: number;
+                total: number;
+                modifiers: string[];
+                note?: string;
+              }> = [];
+              
+              // 尝试不同的修正值组合
+              const modifierOptions = [
+                { value: 0, roles: [] },
+                { value: 2, roles: ['男爵'] },
+                { value: 1, roles: ['方古'] },
+                { value: 1, roles: ['气球驾驶员'] },
+                { value: -1, roles: ['亡骨魔'] },
+                { value: 3, roles: ['男爵', '方古'] },
+                { value: 3, roles: ['男爵', '气球驾驶员'] },
+                { value: 1, roles: ['方古', '气球驾驶员'] },
+                { value: 2, roles: ['方古', '亡骨魔'] },
+                { value: 2, roles: ['气球驾驶员', '亡骨魔'] },
+                { value: 4, roles: ['男爵', '方古', '气球驾驶员'] },
+                { value: 2, roles: ['男爵', '亡骨魔'] },
+                { value: 0, roles: ['方古', '气球驾驶员', '亡骨魔'] },
+              ];
+              
+              // 也考虑教父的±1情况
+              const godfatherOptions = [-1, 0, 1];
+              
+              for (const modifierOption of modifierOptions) {
+                for (const godfatherMod of godfatherOptions) {
+                  const totalModifier = modifierOption.value + godfatherMod;
+                  const allRoles = [...modifierOption.roles];
+                  if (godfatherMod !== 0) {
+                    allRoles.push('教父');
+                  }
+                  
+                  // 尝试不同的总玩家数（从最小到最大合理范围）
+                  for (let totalPlayers = townsfolkCount + 1; totalPlayers <= townsfolkCount + 10; totalPlayers++) {
+                    const baseOutsider = Math.floor(totalPlayers / 3);
+                    const adjustedOutsider = baseOutsider + totalModifier;
+                    const minion = Math.max(0, Math.floor((totalPlayers - 3) / 2));
+                    const demon = 1;
+                    
+                    // 检查是否匹配
+                    if (townsfolkCount + adjustedOutsider + minion + demon === totalPlayers && adjustedOutsider >= 0) {
+                      // 检查是否已存在相同配置
+                      const exists = recommendations.some(r => 
+                        r.outsider === adjustedOutsider && 
+                        r.minion === minion && 
+                        r.demon === demon
+                      );
+                      
+                      if (!exists) {
+                        let note = '';
+                        if (allRoles.length > 0) {
+                          // 如果教父在roles中，已经在allRoles里了，不需要额外备注
+                          const rolesWithoutGodfather = allRoles.filter(r => r !== '教父');
+                          if (rolesWithoutGodfather.length > 0) {
+                            note = `需${rolesWithoutGodfather.join('、')}在场`;
+                          }
+                          if (godfatherMod !== 0 && allRoles.includes('教父')) {
+                            note += note ? `、教父${godfatherMod > 0 ? '+1' : '-1'}` : `需教父${godfatherMod > 0 ? '+1' : '-1'}`;
+                          } else if (godfatherMod !== 0) {
+                            note += note ? `（教父${godfatherMod > 0 ? '+1' : '-1'}）` : `需教父${godfatherMod > 0 ? '+1' : '-1'}`;
+                          }
+                        } else if (godfatherMod !== 0) {
+                          note = `需教父${godfatherMod > 0 ? '+1' : '-1'}`;
+                        }
+                        
+                        recommendations.push({
+                          outsider: adjustedOutsider,
+                          minion,
+                          demon,
+                          total: totalPlayers,
+                          modifiers: allRoles,
+                          note: note || undefined
+                        });
+                      }
+                    }
+                  }
+                }
+              }
+              
+              // 按总玩家数排序，优先显示标准配置
+              recommendations.sort((a, b) => {
+                // 优先显示无特殊角色要求的配置
+                if (a.modifiers.length === 0 && b.modifiers.length > 0) return -1;
+                if (a.modifiers.length > 0 && b.modifiers.length === 0) return 1;
+                return a.total - b.total;
+              });
+              
+              return recommendations.slice(0, 5); // 最多显示5个建议
+            };
+            
+            const recommendations = calculateRecommendations(actualTownsfolkCount);
+            
+            // 检查当前配置是否匹配某个建议
+            const currentMatch = recommendations.find(r => 
+              r.outsider === actualOutsiderCount &&
+              r.minion === actualMinionCount &&
+              r.demon === actualDemonCount
+            );
+            
+            const isValid = currentMatch !== undefined;
+            
             return (
               <div className="space-y-6">
-                {/* 外来者数量校验提示 */}
-                {playerCount > 0 && (
+                {/* 阵营角色数量校验提示 */}
+                {actualTownsfolkCount > 0 && (
                   <div className={`p-4 rounded-lg border-2 ${isValid ? 'bg-green-900/30 border-green-500 text-green-200' : 'bg-yellow-900/30 border-yellow-500 text-yellow-200'}`}>
-                    <div className="font-bold mb-2">📊 外来者数量校验</div>
+                    <div className="font-bold mb-2">📊 阵营角色数量校验</div>
                     <div className="text-sm space-y-1">
-                      <div>当前玩家数：{playerCount}人</div>
-                      <div>基础外来者数：{expectedOutsiderCount}人（玩家数÷3）</div>
-                      {modifier !== 0 && (
-                        <div>角色修正：{modifier > 0 ? '+' : ''}{modifier}人
-                          {hasBaron && <span className="ml-2">（男爵+2）</span>}
-                          {hasGodfather && <span className="ml-2">（教父±1，需说书人决定）</span>}
-                          {hasFangGu && <span className="ml-2">（方古+1）</span>}
-                          {hasVigormortis && <span className="ml-2">（亡骨魔-1）</span>}
-                          {hasBalloonist && <span className="ml-2">（气球驾驶员+1）</span>}
+                      <div>当前村民数：{actualTownsfolkCount}人（保持不变）</div>
+                      <div className="mt-2 font-semibold">建议配置：</div>
+                      {recommendations.length > 0 ? (
+                        <div className="space-y-1 ml-2">
+                          {recommendations.map((rec, idx) => {
+                            const isCurrent = rec.outsider === actualOutsiderCount && 
+                                            rec.minion === actualMinionCount && 
+                                            rec.demon === actualDemonCount;
+                            return (
+                              <div key={idx} className={isCurrent ? 'text-green-300 font-bold' : ''}>
+                                {rec.outsider}外来者、{rec.minion}爪牙、{rec.demon}恶魔
+                                {rec.note && <span className="text-xs opacity-75 ml-1">（{rec.note}）</span>}
+                                {isCurrent && <span className="ml-2">✓ 当前配置</span>}
+                              </div>
+                            );
+                          })}
                         </div>
+                      ) : (
+                        <div className="text-xs opacity-75 ml-2">无有效配置</div>
                       )}
-                      <div>预期外来者数：{adjustedExpected}人{hasGodfather && '（教父可选±1）'}</div>
-                      <div className="font-bold">实际外来者数：{actualOutsiderCount}人</div>
+                      <div className="mt-2 text-xs opacity-75">
+                        实际：{actualOutsiderCount}外来者、{actualMinionCount}爪牙、{actualDemonCount}恶魔
+                      </div>
                       {!isValid && (
-                        <div className="mt-2 text-yellow-300 font-bold">⚠️ 外来者数量不匹配！请检查配置。</div>
+                        <div className="mt-2 text-yellow-300 font-bold">⚠️ 当前配置不在建议范围内！</div>
                       )}
                     </div>
                   </div>
@@ -5609,7 +6135,7 @@ export default function Home() {
                   🎭 红罗刹自动分配：{autoRedHerringInfo}
                 </div>
               )}
-              <div className="bg-gray-800 p-4 rounded-xl text-left text-base space-y-3 max-h-[60vh] overflow-y-auto">
+              <div className="bg-gray-800 p-4 rounded-xl text-left text-base space-y-3 max-h-[80vh] overflow-y-auto check-identity-scrollbar">
                 {seats.filter(s=>s.role).map(s=>{
                   // 酒鬼应该显示伪装角色的名称，而不是"酒鬼"
                   const displayRole = s.role?.id === 'drunk' && s.charadeRole ? s.charadeRole : s.role;
@@ -5627,7 +6153,7 @@ export default function Home() {
                       <div className="flex flex-wrap gap-2 text-[11px] text-gray-300">
                         {s.statusDetails?.length ? (
                           s.statusDetails.map(st => (
-                            <span key={st} className="px-2 py-0.5 rounded bg-gray-700 text-yellow-300 border border-gray-600">{st}</span>
+                            <span key={st} className={`px-2 py-0.5 rounded bg-gray-700 text-yellow-300 border border-gray-600 ${st.includes('投毒') ? 'whitespace-nowrap' : ''}`}>{st}</span>
                           ))
                         ) : (
                           <span className="text-gray-500">无特殊状态</span>
@@ -5836,92 +6362,6 @@ export default function Home() {
               >
                 确认 / 下一步
               </button>
-              {/* 伪装身份识别列表 */}
-              {(() => {
-                const spySeats = seats.filter(s => s.role?.id === 'spy');
-                const chefSeat = seats.find(s => s.role?.id === 'chef');
-                const empathSeat = seats.find(s => s.role?.id === 'empath');
-                const hasInterferenceRoles = spySeats.length > 0 && (chefSeat || empathSeat);
-                
-                if (hasInterferenceRoles) {
-                  return (
-                    <div className="w-full mt-3 p-3 bg-gray-800 rounded-xl border border-gray-600">
-                      <h4 className="text-sm font-bold mb-2 text-yellow-400">🎭 伪装身份识别</h4>
-                      <div className="mb-2 text-xs text-gray-300">
-                        {spySeats.map(s => (
-                          <div key={s.id} className="mb-1">
-                            {s.id + 1}号 - 间谍
-                          </div>
-                        ))}
-                        {(chefSeat || empathSeat) && (
-                          <div className="mt-2 text-gray-400">
-                            可能受影响：{chefSeat && '厨师'} {chefSeat && empathSeat && '、'} {empathSeat && '共情者'}
-                          </div>
-                        )}
-                      </div>
-                      <div className="mt-3 space-y-2">
-                        <div className="flex items-center gap-2">
-                          <label className="text-xs text-gray-300 flex-shrink-0">干扰模式：</label>
-                          <div className="flex gap-1 flex-1">
-                            <button
-                              onClick={() => setSpyDisguiseMode('off')}
-                              className={`flex-1 py-1 px-2 text-xs rounded ${
-                                spyDisguiseMode === 'off' 
-                                  ? 'bg-red-600 text-white' 
-                                  : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-                              }`}
-                            >
-                              关闭干扰
-                            </button>
-                            <button
-                              onClick={() => setSpyDisguiseMode('default')}
-                              className={`flex-1 py-1 px-2 text-xs rounded ${
-                                spyDisguiseMode === 'default' 
-                                  ? 'bg-blue-600 text-white' 
-                                  : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-                              }`}
-                            >
-                              默认
-                            </button>
-                            <button
-                              onClick={() => setSpyDisguiseMode('on')}
-                              className={`flex-1 py-1 px-2 text-xs rounded ${
-                                spyDisguiseMode === 'on' 
-                                  ? 'bg-green-600 text-white' 
-                                  : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-                              }`}
-                            >
-                              开启干扰
-                            </button>
-                          </div>
-                        </div>
-                        {spyDisguiseMode === 'on' && (
-                          <div className="flex items-center gap-2">
-                            <label className="text-xs text-gray-300 flex-shrink-0">干扰概率：</label>
-                            <input
-                              type="range"
-                              min="0"
-                              max="100"
-                              value={spyDisguiseProbability * 100}
-                              onChange={(e) => setSpyDisguiseProbability(parseInt(e.target.value) / 100)}
-                              className="flex-1"
-                            />
-                            <span className="text-xs text-gray-300 w-12 text-right">
-                              {Math.round(spyDisguiseProbability * 100)}%
-                            </span>
-                          </div>
-                        )}
-                        {spyDisguiseMode === 'default' && (
-                          <div className="text-xs text-gray-400">
-                            默认概率：80%
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  );
-                }
-                return null;
-              })()}
             </>
           )}
           {gamePhase==='day' && (
@@ -6738,22 +7178,22 @@ export default function Home() {
       )}
       
       {showReviewModal && (
-        <div className="fixed inset-0 z-[5000] bg-black/95 flex flex-col p-10 overflow-auto">
-          <div className="flex justify-between items-center mb-6">
-              <h2 className="text-4xl">📜 对局复盘</h2>
+        <div className={`fixed inset-0 z-[5000] bg-black/95 flex flex-col ${isPortrait ? 'p-4' : 'p-10'} overflow-auto`}>
+          <div className={`flex justify-between items-center ${isPortrait ? 'mb-4' : 'mb-6'}`}>
+              <h2 className={`${isPortrait ? 'text-2xl' : 'text-4xl'}`}>📜 对局复盘</h2>
             <button 
               onClick={()=>setShowReviewModal(false)} 
-              className="px-6 py-2 bg-gray-700 hover:bg-gray-600 rounded text-lg"
+              className={`${isPortrait ? 'px-4 py-1.5 text-sm' : 'px-6 py-2 text-lg'} bg-gray-700 hover:bg-gray-600 rounded`}
             >
               关闭
             </button>
           </div>
-          <div className="bg-black/50 p-6 rounded-xl flex gap-6 h-[calc(100vh-12rem)]">
-            <div className="w-1/3">
-              <h4 className="text-purple-400 mb-4 font-bold border-b pb-2 text-xl">📖 当前座位信息</h4>
-              <div className="space-y-2 max-h-[calc(100vh-16rem)] overflow-y-auto">
+          <div className={`bg-black/50 ${isPortrait ? 'p-3' : 'p-6'} rounded-xl ${isPortrait ? 'flex-col' : 'flex'} gap-6 ${isPortrait ? 'min-h-[calc(100vh-8rem)]' : 'h-[calc(100vh-12rem)]'}`}>
+            <div className={`${isPortrait ? 'w-full' : 'w-1/3'}`}>
+              <h4 className={`text-purple-400 ${isPortrait ? 'mb-2 text-sm' : 'mb-4 text-xl'} font-bold border-b pb-2`}>📖 当前座位信息</h4>
+              <div className={`space-y-2 ${isPortrait ? 'max-h-64' : 'max-h-[calc(100vh-16rem)]'} overflow-y-auto`}>
                 {seats.filter(s=>s.role).map(s => (
-                  <div key={s.id} className="py-2 border-b border-gray-700 flex justify-between items-center">
+                  <div key={s.id} className={`py-2 border-b border-gray-700 flex justify-between items-center ${isPortrait ? 'text-xs' : ''}`}>
                     <span className="font-bold">{s.id+1}号</span>
                     <div className="flex flex-col items-end">
                       <span className={s.role?.type==='demon'?'text-red-500 font-bold':s.role?.type==='minion'?'text-orange-500':'text-blue-400'}>
@@ -6761,17 +7201,17 @@ export default function Home() {
                         {s.role?.id==='drunk'&&` (伪:${s.charadeRole?.name})`}
                         {s.isRedHerring && ' [红罗刹]'}
                       </span>
-                      {s.isDead && <span className="text-xs text-gray-500 mt-1">💀 已死亡</span>}
-                      {s.isPoisoned && <span className="text-xs text-green-500 mt-1">🧪 中毒</span>}
-                      {s.isProtected && <span className="text-xs text-blue-500 mt-1">🛡️ 受保护</span>}
+                      {s.isDead && <span className={`${isPortrait ? 'text-[10px]' : 'text-xs'} text-gray-500 mt-1`}>💀 已死亡</span>}
+                      {s.isPoisoned && <span className={`${isPortrait ? 'text-[10px]' : 'text-xs'} text-green-500 mt-1`}>🧪 中毒</span>}
+                      {s.isProtected && <span className={`${isPortrait ? 'text-[10px]' : 'text-xs'} text-blue-500 mt-1`}>🛡️ 受保护</span>}
                     </div>
                   </div>
                 ))}
               </div>
             </div>
-            <div className="w-2/3">
-              <h4 className="text-yellow-400 mb-4 font-bold border-b pb-2 text-xl">📋 操作记录</h4>
-              <div className="space-y-4 max-h-[calc(100vh-16rem)] overflow-y-auto">
+            <div className={`${isPortrait ? 'w-full' : 'w-2/3'}`}>
+              <h4 className={`text-yellow-400 ${isPortrait ? 'mb-2 text-sm' : 'mb-4 text-xl'} font-bold border-b pb-2`}>📋 操作记录</h4>
+              <div className={`space-y-4 ${isPortrait ? 'max-h-96' : 'max-h-[calc(100vh-16rem)]'} overflow-y-auto`}>
                 {(() => {
                   // 按阶段顺序组织日志：firstNight -> night -> day -> dusk
                   const phaseOrder: Record<string, number> = {
@@ -6808,13 +7248,13 @@ export default function Home() {
                       phase === 'dusk' ? `第${day}天黄昏` : `第${day}轮`;
                     
                     return (
-                      <div key={key} className="mb-4 bg-gray-900/50 p-4 rounded-lg">
-                        <div className="text-yellow-300 font-bold mb-3 text-lg border-b border-yellow-500/30 pb-2">
+                      <div key={key} className={`mb-4 bg-gray-900/50 ${isPortrait ? 'p-2' : 'p-4'} rounded-lg`}>
+                        <div className={`text-yellow-300 font-bold ${isPortrait ? 'mb-2 text-sm' : 'mb-3 text-lg'} border-b border-yellow-500/30 pb-2`}>
                           {phaseName}
                         </div>
                         <div className="space-y-2">
                           {logs.map((l, i) => (
-                            <div key={i} className="py-2 border-b border-gray-700 text-gray-300 text-sm pl-2">
+                            <div key={i} className={`py-2 border-b border-gray-700 text-gray-300 ${isPortrait ? 'text-xs' : 'text-sm'} pl-2`}>
                               {l.message}
                             </div>
                           ))}
@@ -6844,21 +7284,21 @@ export default function Home() {
       )}
 
       {showGameRecordsModal && (
-        <div className="fixed inset-0 z-[5000] bg-black/95 flex flex-col p-10 overflow-auto">
-          <div className="flex justify-between items-center mb-6">
-            <h2 className="text-4xl">📚 对局记录</h2>
+        <div className={`fixed inset-0 z-[5000] bg-black/95 flex flex-col ${isPortrait ? 'p-4' : 'p-10'} overflow-auto`}>
+          <div className={`flex justify-between items-center ${isPortrait ? 'mb-4' : 'mb-6'}`}>
+            <h2 className={`${isPortrait ? 'text-2xl' : 'text-4xl'}`}>📚 对局记录</h2>
             <button 
               onClick={()=>setShowGameRecordsModal(false)} 
-              className="px-6 py-2 bg-gray-700 hover:bg-gray-600 rounded text-lg"
+              className={`${isPortrait ? 'px-4 py-1.5 text-sm' : 'px-6 py-2 text-lg'} bg-gray-700 hover:bg-gray-600 rounded`}
             >
               关闭
             </button>
           </div>
-          <div className="space-y-4 max-h-[calc(100vh-8rem)] overflow-y-auto">
+          <div className={`space-y-4 ${isPortrait ? 'max-h-[calc(100vh-6rem)]' : 'max-h-[calc(100vh-8rem)]'} overflow-y-auto`}>
             {gameRecords.length === 0 ? (
-              <div className="text-center text-gray-500 py-20">
-                <p className="text-2xl mb-4">暂无对局记录</p>
-                <p className="text-sm">完成游戏后，记录会自动保存到这里</p>
+              <div className={`text-center text-gray-500 ${isPortrait ? 'py-10' : 'py-20'}`}>
+                <p className={`${isPortrait ? 'text-xl' : 'text-2xl'} mb-4`}>暂无对局记录</p>
+                <p className={`${isPortrait ? 'text-xs' : 'text-sm'}`}>完成游戏后，记录会自动保存到这里</p>
               </div>
             ) : (
               gameRecords.map((record) => {
@@ -6907,17 +7347,17 @@ export default function Home() {
                 });
                 
                 return (
-                  <div key={record.id} className="bg-gray-900/50 p-6 rounded-xl border border-gray-700">
-                    <div className="flex justify-between items-start mb-4">
+                  <div key={record.id} className={`bg-gray-900/50 ${isPortrait ? 'p-3' : 'p-6'} rounded-xl border border-gray-700`}>
+                    <div className={`flex ${isPortrait ? 'flex-col' : 'justify-between'} items-start ${isPortrait ? 'gap-3' : 'mb-4'}`}>
                       <div>
-                        <h3 className="text-2xl font-bold text-white mb-2">{record.scriptName}</h3>
-                        <div className="text-sm text-gray-400 space-y-1">
+                        <h3 className={`${isPortrait ? 'text-lg' : 'text-2xl'} font-bold text-white ${isPortrait ? 'mb-1' : 'mb-2'}`}>{record.scriptName}</h3>
+                        <div className={`${isPortrait ? 'text-xs' : 'text-sm'} text-gray-400 space-y-1`}>
                           <p>开始时间：{startTimeStr}</p>
                           <p>结束时间：{endTimeStr}</p>
                           <p>游戏时长：{durationStr}</p>
                         </div>
                       </div>
-                      <div className={`text-xl font-bold px-4 py-2 rounded ${
+                      <div className={`${isPortrait ? 'text-sm' : 'text-xl'} font-bold ${isPortrait ? 'px-3 py-1.5' : 'px-4 py-2'} rounded ${
                         record.winResult === 'good' 
                           ? 'bg-blue-900/50 text-blue-400 border border-blue-500' 
                           : record.winResult === 'evil'
@@ -6932,15 +7372,15 @@ export default function Home() {
                       </div>
                     </div>
                     {record.winReason && (
-                      <p className="text-sm text-gray-300 mb-4">
+                      <p className={`${isPortrait ? 'text-xs' : 'text-sm'} text-gray-300 ${isPortrait ? 'mb-3' : 'mb-4'}`}>
                         {record.winResult ? '胜利依据' : '结束原因'}：{record.winReason}
                       </p>
                     )}
                     
-                    <div className="grid grid-cols-2 gap-6 mt-6">
+                    <div className={`grid ${isPortrait ? 'grid-cols-1' : 'grid-cols-2'} ${isPortrait ? 'gap-4' : 'gap-6'} ${isPortrait ? 'mt-4' : 'mt-6'}`}>
                       <div>
-                        <h4 className="text-purple-400 mb-3 font-bold border-b pb-2">📖 座位信息</h4>
-                        <div className="space-y-2 max-h-64 overflow-y-auto">
+                        <h4 className={`text-purple-400 ${isPortrait ? 'mb-2 text-sm' : 'mb-3'} font-bold border-b pb-2`}>📖 座位信息</h4>
+                        <div className={`space-y-2 ${isPortrait ? 'max-h-48' : 'max-h-64'} overflow-y-auto`}>
                           {record.seats.filter(s=>s.role).map(s => (
                             <div key={s.id} className="py-1 border-b border-gray-700 flex justify-between items-center text-sm">
                               <span className="font-bold">{s.id+1}号</span>
@@ -6955,7 +7395,7 @@ export default function Home() {
                                   {s.isPoisoned && <span className="px-2 py-0.5 rounded bg-green-900/60 text-green-200 border border-green-700">🧪 中毒</span>}
                                   {s.isProtected && <span className="px-2 py-0.5 rounded bg-blue-900/60 text-blue-200 border border-blue-700">🛡️ 受保护</span>}
                                   {s.statusDetails?.map(st => (
-                                    <span key={st} className="px-2 py-0.5 rounded bg-gray-800/80 text-yellow-200 border border-gray-600">{st}</span>
+                                    <span key={st} className={`px-2 py-0.5 rounded bg-gray-800/80 text-yellow-200 border border-gray-600 ${st.includes('投毒') ? 'whitespace-nowrap' : ''}`}>{st}</span>
                                   ))}
                                   {s.hasUsedSlayerAbility && <span className="px-2 py-0.5 rounded bg-red-900/70 text-red-100 border border-red-700">猎手已用</span>}
                                   {s.hasUsedVirginAbility && <span className="px-2 py-0.5 rounded bg-purple-900/70 text-purple-100 border border-purple-700">处女失效</span>}
@@ -6969,8 +7409,8 @@ export default function Home() {
                       </div>
                       
                       <div>
-                        <h4 className="text-yellow-400 mb-3 font-bold border-b pb-2">📋 操作记录</h4>
-                        <div className="space-y-3 max-h-64 overflow-y-auto">
+                        <h4 className={`text-yellow-400 ${isPortrait ? 'mb-2 text-sm' : 'mb-3'} font-bold border-b pb-2`}>📋 操作记录</h4>
+                        <div className={`space-y-3 ${isPortrait ? 'max-h-48' : 'max-h-64'} overflow-y-auto`}>
                           {sortedLogs.map(([key, logs]) => {
                             const [day, phase] = key.split('_');
                             const phaseName = 
@@ -6980,11 +7420,11 @@ export default function Home() {
                               phase === 'dusk' ? `第${day}天黄昏` : `第${day}轮`;
                             
                             return (
-                              <div key={key} className="bg-gray-800/50 p-2 rounded text-xs">
-                                <div className="text-yellow-300 font-bold mb-1">{phaseName}</div>
+                              <div key={key} className={`bg-gray-800/50 ${isPortrait ? 'p-1.5' : 'p-2'} rounded ${isPortrait ? 'text-[10px]' : 'text-xs'}`}>
+                                <div className={`text-yellow-300 font-bold ${isPortrait ? 'mb-0.5 text-[10px]' : 'mb-1'}`}>{phaseName}</div>
                                 <div className="space-y-1">
                                   {logs.map((l, i) => (
-                                    <div key={i} className="text-gray-300 pl-2 text-xs">
+                                    <div key={i} className={`text-gray-300 pl-2 ${isPortrait ? 'text-[10px]' : 'text-xs'}`}>
                                       {l.message}
                                     </div>
                                   ))}
@@ -6993,7 +7433,7 @@ export default function Home() {
                             );
                           })}
                           {record.gameLogs.length === 0 && (
-                            <div className="text-gray-500 text-center py-4 text-sm">暂无操作记录</div>
+                            <div className={`text-gray-500 text-center py-4 ${isPortrait ? 'text-xs' : 'text-sm'}`}>暂无操作记录</div>
                           )}
                         </div>
                       </div>
@@ -7006,19 +7446,47 @@ export default function Home() {
         </div>
       )}
 
-      {showRoleInfoModal && (
-        <div className="fixed inset-0 z-[5000] bg-black/95 flex flex-col p-8 overflow-auto">
-          <div className="flex justify-between items-center mb-6">
-            <h2 className="text-4xl">📖 角色信息</h2>
-            <button 
-              onClick={()=>setShowRoleInfoModal(false)} 
-              className="px-6 py-2 bg-gray-700 hover:bg-gray-600 rounded text-lg"
-            >
-              确认
-            </button>
-          </div>
+      {showRoleInfoModal && (() => {
+        // 获取角色的行动时间说明
+        const getActionTimeDescription = (role: Role): string => {
+          if (role.firstNight && role.otherNight) {
+            return "首夜与其他夜晚行动";
+          } else if (role.firstNight && !role.otherNight) {
+            return "仅首夜行动";
+          } else if (!role.firstNight && role.otherNight) {
+            return "其他夜晚行动";
+          } else {
+            return "无夜晚行动";
+          }
+        };
+
+        // 如果选择了剧本，分成两部分：本剧本角色和其他角色
+        const currentScriptRoles = selectedScript ? filteredGroupedRoles : {};
+        const otherRoles = selectedScript ? (() => {
+          const currentScriptRoleIds = new Set(
+            Object.values(filteredGroupedRoles).flat().map(r => r.id)
+          );
+          const other = roles.filter(r => !currentScriptRoleIds.has(r.id));
+          return other.reduce((acc, role) => {
+            if (!acc[role.type]) acc[role.type] = [];
+            acc[role.type].push(role);
+            return acc;
+          }, {} as Record<string, Role[]>);
+        })() : groupedRoles;
+
+        const renderRoleSection = (title: string, rolesToShow: Record<string, Role[]>, isSticky: boolean = false) => (
           <div className="space-y-8">
-            {Object.entries(groupedRoles).map(([type, roleList]) => (
+            {title && (
+              <h2 
+                className={`text-3xl font-bold text-yellow-400 mb-4 ${
+                  isSticky ? 'sticky z-20 bg-black/95 py-3 -mt-6 -mx-8 px-8 border-b border-yellow-400/30 backdrop-blur-sm shadow-lg' : ''
+                }`}
+                style={isSticky ? { top: '0px' } : undefined}
+              >
+                {title}
+              </h2>
+            )}
+            {Object.entries(rolesToShow).map(([type, roleList]) => (
               <div key={type} className="bg-gray-900/50 p-6 rounded-xl">
                 <h3 className={`text-2xl font-bold mb-4 ${typeColors[type]}`}>
                   {typeLabels[type]}
@@ -7030,30 +7498,48 @@ export default function Home() {
                       className={`p-4 border-2 rounded-lg ${typeColors[type]} ${typeBgColors[type]} transition-all hover:scale-105`}
                     >
                       <div className="font-bold text-lg mb-2">{role.name}</div>
-                      <div className="text-sm text-gray-300 leading-relaxed">
+                      <div className="text-sm text-gray-300 leading-relaxed mb-2">
                         {role.ability}
                       </div>
-                      {(role.firstNight || role.otherNight) && (
-                        <div className="mt-3 pt-3 border-t border-gray-700 text-xs text-gray-400">
-                          {role.firstNight && role.otherNight && (
-                            <div>首夜与其他夜晚行动</div>
-                          )}
-                          {role.firstNight && !role.otherNight && (
-                            <div>仅首夜行动</div>
-                          )}
-                          {!role.firstNight && role.otherNight && (
-                            <div>其他夜晚行动</div>
-                          )}
-                        </div>
-                      )}
+                      <div className="mt-3 pt-3 border-t border-gray-700 text-xs text-gray-400">
+                        {getActionTimeDescription(role)}
+                      </div>
                     </div>
                   ))}
                 </div>
               </div>
             ))}
           </div>
-        </div>
-      )}
+        );
+
+        return (
+          <div className="fixed inset-0 z-[5000] bg-black/95 flex flex-col overflow-hidden">
+            {/* 永久置顶的标题栏 */}
+            <div className="sticky top-0 z-30 bg-black/95 border-b border-gray-700 px-8 py-6 flex-shrink-0" id="role-info-header">
+              <div className="flex justify-between items-center">
+                <h2 className="text-4xl">📖 角色信息</h2>
+                <button 
+                  onClick={()=>setShowRoleInfoModal(false)} 
+                  className="px-6 py-2 bg-gray-700 hover:bg-gray-600 rounded text-lg"
+                >
+                  确认
+                </button>
+              </div>
+            </div>
+            {/* 可滚动的内容区域 */}
+            <div className="flex-1 overflow-y-auto">
+              <div className="px-8 py-6 space-y-12">
+                {selectedScript && Object.keys(currentScriptRoles).length > 0 && (
+                  renderRoleSection("🎯 正在进行中的剧本角色", currentScriptRoles, true)
+                )}
+                {Object.keys(otherRoles).length > 0 && (
+                  renderRoleSection(selectedScript ? "📚 其他剧本角色" : "", otherRoles, selectedScript ? true : false)
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {contextMenu && (() => {
         const targetSeat = seats.find(s => s.id === contextMenu.seatId);
@@ -7092,20 +7578,24 @@ export default function Home() {
           >
             💀 切换死亡
           </button>
-          {/* 在核对身份阶段，允许选择红罗刹（仅限善良阵营），爪牙和恶魔为灰色不可选 */}
-          {gamePhase === 'check' && targetSeat.role && (
-            <button
-              onClick={()=>!['minion','demon'].includes(targetSeat.role!.type) && toggleStatus('redherring')}
-              disabled={['minion','demon'].includes(targetSeat.role.type)}
-              className={`block w-full text-left px-6 py-3 text-lg font-medium border-t border-gray-700 whitespace-nowrap ${
-                ['minion','demon'].includes(targetSeat.role.type)
-                  ? 'text-gray-500 cursor-not-allowed bg-gray-800'
-                  : 'hover:bg-red-900 text-red-300'
-              }`}
-            >
-              🎭 选为红罗刹
-            </button>
-          )}
+          {/* 在核对身份阶段，允许选择红罗刹（仅限善良阵营），爪牙和恶魔为灰色不可选，且需要场上有占卜师 */}
+          {gamePhase === 'check' && targetSeat.role && (() => {
+            const hasFortuneTeller = seats.some(s => s.role?.id === "fortune_teller");
+            const isDisabled = ['minion','demon'].includes(targetSeat.role.type) || !hasFortuneTeller;
+            return (
+              <button
+                onClick={()=>!isDisabled && toggleStatus('redherring')}
+                disabled={isDisabled}
+                className={`block w-full text-left px-6 py-3 text-lg font-medium border-t border-gray-700 whitespace-nowrap ${
+                  isDisabled
+                    ? 'text-gray-500 cursor-not-allowed bg-gray-800'
+                    : 'hover:bg-red-900 text-red-300'
+                }`}
+              >
+                🎭 选为红罗刹
+              </button>
+            );
+          })()}
         </div>
         );
       })()}
@@ -7610,6 +8100,129 @@ export default function Home() {
           </div>
         </div>
       )}
+
+      {/* 伪装身份识别浮窗 */}
+      {showSpyDisguiseModal && (() => {
+        const spySeats = seats.filter(s => s.role?.id === 'spy');
+        const recluseSeats = seats.filter(s => s.role?.id === 'recluse');
+        const chefSeat = seats.find(s => s.role?.id === 'chef');
+        const empathSeat = seats.find(s => s.role?.id === 'empath');
+        const investigatorSeat = seats.find(s => s.role?.id === 'investigator');
+        const fortuneTellerSeat = seats.find(s => s.role?.id === 'fortune_teller');
+        const hasInterferenceRoles = (spySeats.length > 0 || recluseSeats.length > 0) && 
+                                    (chefSeat || empathSeat || investigatorSeat || fortuneTellerSeat);
+        
+        return (
+          <div 
+            className="fixed inset-0 z-[5000] bg-black/50 flex items-center justify-center"
+            onClick={() => setShowSpyDisguiseModal(false)}
+          >
+            <div 
+              className="bg-gray-800 border-2 border-purple-500 rounded-xl p-4 w-80 shadow-2xl"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex justify-between items-center mb-3">
+                <h3 className="text-lg font-bold text-purple-300">🎭 伪装身份识别</h3>
+                <button
+                  onClick={() => setShowSpyDisguiseModal(false)}
+                  className="text-gray-400 hover:text-white text-xl"
+                >
+                  ×
+                </button>
+              </div>
+              
+              {hasInterferenceRoles ? (
+                <div className="space-y-3 text-sm">
+                  {spySeats.length > 0 && (
+                    <div>
+                      <div className="text-xs text-gray-400 mb-1">间谍：</div>
+                      {spySeats.map(s => (
+                        <div key={s.id} className="text-gray-300 ml-2">{s.id + 1}号</div>
+                      ))}
+                    </div>
+                  )}
+                  {recluseSeats.length > 0 && (
+                    <div>
+                      <div className="text-xs text-gray-400 mb-1">隐士：</div>
+                      {recluseSeats.map(s => (
+                        <div key={s.id} className="text-gray-300 ml-2">{s.id + 1}号</div>
+                      ))}
+                    </div>
+                  )}
+                  <div className="pt-2 border-t border-gray-700">
+                    <div className="text-xs text-gray-400 mb-2">干扰模式：</div>
+                    <div className="flex gap-1">
+                      <button
+                        onClick={() => setSpyDisguiseMode('off')}
+                        className={`flex-1 py-1.5 px-2 text-xs rounded ${
+                          spyDisguiseMode === 'off' 
+                            ? 'bg-red-600 text-white' 
+                            : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                        }`}
+                      >
+                        关闭
+                      </button>
+                      <button
+                        onClick={() => setSpyDisguiseMode('default')}
+                        className={`flex-1 py-1.5 px-2 text-xs rounded ${
+                          spyDisguiseMode === 'default' 
+                            ? 'bg-blue-600 text-white' 
+                            : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                        }`}
+                      >
+                        默认
+                      </button>
+                      <button
+                        onClick={() => setSpyDisguiseMode('on')}
+                        className={`flex-1 py-1.5 px-2 text-xs rounded ${
+                          spyDisguiseMode === 'on' 
+                            ? 'bg-green-600 text-white' 
+                            : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                        }`}
+                      >
+                        开启
+                      </button>
+                    </div>
+                  </div>
+                  {spyDisguiseMode === 'on' && (
+                    <div className="flex items-center gap-2">
+                      <label className="text-xs text-gray-300 flex-shrink-0">概率：</label>
+                      <input
+                        type="range"
+                        min="0"
+                        max="100"
+                        value={spyDisguiseProbability * 100}
+                        onChange={(e) => setSpyDisguiseProbability(parseInt(e.target.value) / 100)}
+                        className="flex-1"
+                      />
+                      <span className="text-xs text-gray-300 w-10 text-right">
+                        {Math.round(spyDisguiseProbability * 100)}%
+                      </span>
+                    </div>
+                  )}
+                  {spyDisguiseMode === 'default' && (
+                    <div className="text-xs text-gray-400">
+                      默认概率：80%
+                    </div>
+                  )}
+                  {(chefSeat || empathSeat || investigatorSeat || fortuneTellerSeat) && (
+                    <div className="text-xs text-gray-400 pt-2 border-t border-gray-700">
+                      受影响角色：{chefSeat && '厨师'} {chefSeat && (empathSeat || investigatorSeat || fortuneTellerSeat) && '、'}
+                      {empathSeat && '共情者'} {(chefSeat || empathSeat) && (investigatorSeat || fortuneTellerSeat) && '、'}
+                      {investigatorSeat && '调查员'} {(chefSeat || empathSeat || investigatorSeat) && fortuneTellerSeat && '、'}
+                      {fortuneTellerSeat && '占卜师'}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="text-sm text-gray-400 text-center py-4">
+                  当前无需要伪装身份识别的角色
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }

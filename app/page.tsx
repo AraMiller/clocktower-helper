@@ -1764,6 +1764,7 @@ export default function Home() {
   const [showMenu, setShowMenu] = useState(false);
   const [longPressingSeats, setLongPressingSeats] = useState<Set<number>>(new Set()); // 正在长按的座位
   const checkLongPressTimerRef = useRef<NodeJS.Timeout | null>(null); // 核对身份列表长按定时器
+  const longPressTriggeredRef = useRef<Set<number>>(new Set()); // 座位长按是否已触发（避免短按被阻断）
   
   const [wakeQueueIds, setWakeQueueIds] = useState<number[]>([]);
   const [currentWakeIndex, setCurrentWakeIndex] = useState(0);
@@ -2364,6 +2365,7 @@ export default function Home() {
         clearTimeout(timer);
       });
       longPressTimerRef.current.clear();
+      longPressTriggeredRef.current.clear();
       if (checkLongPressTimerRef.current) {
         clearTimeout(checkLongPressTimerRef.current);
         checkLongPressTimerRef.current = null;
@@ -5055,11 +5057,13 @@ export default function Home() {
     }
     // 添加长按状态，用于视觉反馈
     setLongPressingSeats(prev => new Set(prev).add(seatId));
+    longPressTriggeredRef.current.delete(seatId);
     // 获取触摸位置
     const touch = e.touches[0];
     // 设置0.5秒后触发右键菜单
     const timer = setTimeout(() => {
       setContextMenu({x:touch.clientX, y:touch.clientY, seatId});
+      longPressTriggeredRef.current.add(seatId);
       longPressTimerRef.current.delete(seatId);
       setLongPressingSeats(prev => {
         const next = new Set(prev);
@@ -5078,6 +5082,10 @@ export default function Home() {
     if (timer) {
       clearTimeout(timer);
       longPressTimerRef.current.delete(seatId);
+      // 若未触发长按，视为一次点击（用于触屏落座/选中）
+      if (!longPressTriggeredRef.current.has(seatId)) {
+        handleSeatClick(seatId);
+      }
     }
     // 清除长按状态
     setLongPressingSeats(prev => {
@@ -5721,6 +5729,9 @@ export default function Home() {
                     transform:'translate(-50%,-50%)',
                     width: `calc(${isPortrait ? '3rem' : '6rem'} * ${seatScale})`,
                     height: `calc(${isPortrait ? '3rem' : '6rem'} * ${seatScale})`,
+                    WebkitUserSelect: 'none',
+                    userSelect: 'none',
+                    touchAction: 'manipulation',
                   }} 
                 className="absolute flex items-center justify-center"
               >

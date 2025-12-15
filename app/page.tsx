@@ -7389,11 +7389,19 @@ export default function Home() {
 
       {/* Modals */}
       {showNightOrderModal && (
-        <div className="fixed inset-0 z-[3200] bg-black/90 flex items-center justify-center px-4">
-          <div className="bg-gray-900 border-4 border-yellow-500 rounded-2xl p-6 max-w-4xl w-full space-y-4 shadow-2xl max-h-[80vh] overflow-hidden">
-            <div className="text-2xl font-bold text-yellow-300 text-center">🌙 今晚要叫醒的角色顺位表</div>
+        <div
+          className="fixed inset-0 z-[3200] bg-black/90 flex items-center justify-center px-4"
+          onClick={closeNightOrderPreview}
+        >
+          <div
+            className="bg-gray-900 border-4 border-yellow-500 rounded-2xl p-6 max-w-4xl w-full space-y-4 shadow-2xl max-h-[80vh] overflow-hidden"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="text-2xl font-bold text-yellow-300 text-center">
+              {nightQueuePreviewTitle || '🌙 今晚要唤醒的顺序列表'}
+            </div>
             <p className="text-sm text-gray-200 text-center">
-              按首夜顺位排序，方便逐一叫醒。确认后进入首夜。
+              请核对今晚要叫醒的所有角色顺序。你可以点击“返回调整”继续修改座位/身份，或点击“确认”正式进入夜晚流程。
             </p>
             <div className="grid grid-cols-1 gap-3 max-h-[64vh] overflow-y-auto">
               {nightOrderPreview.map((item, idx) => (

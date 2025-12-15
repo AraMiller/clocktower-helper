@@ -3314,14 +3314,32 @@ export default function Home() {
       return isFirst ? (r?.firstNightOrder ?? 0) > 0 : (r?.otherNightOrder ?? 0) > 0;
     });
     
+    // 若本夜没有任何需要被叫醒的角色，直接进入夜晚结算，避免卡在"正在计算行动..."
+    if (validQueue.length === 0) {
+      setWakeQueueIds([]);
+      setCurrentWakeIndex(0);
+      // 无任何叫醒目标时，直接进入夜晚结算弹窗
+      if (nightlyDeaths.length > 0) {
+        const deadNames = nightlyDeaths.map(id => `${id + 1}号`).join('、');
+        setShowNightDeathReportModal(`昨晚${deadNames}玩家死亡`);
+      } else {
+        setShowNightDeathReportModal("昨天是个平安夜");
+      }
+      // 直接进入夜晚报道阶段
+      setGamePhase('dawnReport');
+      return;
+    }
+
     if (isFirst) {
       setPendingNightQueue(validQueue);
-      setNightOrderPreview(validQueue
-        .map(s => {
-          const r = s.role?.id === 'drunk' ? s.charadeRole : s.role;
-          return { roleName: r?.name || '未知角色', seatNo: s.id + 1, order: r?.firstNightOrder ?? 999 };
-        })
-        .sort((a,b)=> (a.order ?? 999) - (b.order ?? 999)));
+      setNightOrderPreview(
+        validQueue
+          .map(s => {
+            const r = s.role?.id === 'drunk' ? s.charadeRole : s.role;
+            return { roleName: r?.name || '未知角色', seatNo: s.id + 1, order: r?.firstNightOrder ?? 999 };
+          })
+          .sort((a, b) => (a.order ?? 999) - (b.order ?? 999))
+      );
       setShowNightOrderModal(true);
       return;
     }

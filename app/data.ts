@@ -107,7 +107,12 @@ export interface Script {
 
 // 剧本列表
 export const scripts: Script[] = [
-  { id: "trouble_brewing", name: "暗流涌动", difficulty: "初学者" },
+  { 
+    id: "trouble_brewing", 
+    name: "暗流涌动", 
+    difficulty: "初学者",
+    description: "当【男爵 (Baron)】在场时，系统会自动将 2 名镇民替换为 2 名外来者。"
+  },
   { id: "bad_moon_rising", name: "暗月初升", difficulty: "中等" },
   { id: "sects_and_violets", name: "梦陨春宵", difficulty: "中等" },
   { id: "midnight_revelry", name: "夜半狂欢", difficulty: "困难" },

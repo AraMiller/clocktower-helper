@@ -46,6 +46,7 @@ export interface Seat {
   role: Role | null;
   charadeRole: Role | null;
   isDead: boolean;
+  hasGhostVote?: boolean; // 死者票是否可用
   isEvilConverted?: boolean; // 通过灵言师等效果被转为邪恶
   isGoodConverted?: boolean; // 特殊效果被转为善良（如舞蛇人命中恶魔）
   isDrunk: boolean;

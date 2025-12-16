@@ -1945,6 +1945,11 @@ export default function Home() {
   const [showExecutionResultModal, setShowExecutionResultModal] = useState<{message: string, isVirginTrigger?: boolean} | null>(null);
   const [showShootResultModal, setShowShootResultModal] = useState<{message: string, isDemonDead: boolean} | null>(null);
   const [showKillConfirmModal, setShowKillConfirmModal] = useState<number | null>(null); // 恶魔确认杀死玩家
+  const [showAttackBlockedModal, setShowAttackBlockedModal] = useState<{
+    targetId: number;
+    reason: string;
+    demonName?: string;
+  } | null>(null); // 攻击无效提示（僧侣/士兵/茶艺师保护）
   const [showMayorRedirectModal, setShowMayorRedirectModal] = useState<{targetId: number; demonName: string} | null>(null); // 市长被攻击时的转移提示
   const [mayorRedirectTarget, setMayorRedirectTarget] = useState<number | null>(null); // 市长转移的目标
   const [showMayorThreeAliveModal, setShowMayorThreeAliveModal] = useState(false); // 3人生存且有市长时的处决前提醒
@@ -1960,7 +1965,6 @@ export default function Home() {
   const [showBarberSwapModal, setShowBarberSwapModal] = useState<{demonId: number; firstId: number | null; secondId: number | null} | null>(null); // 理发师死亡后交换
   const [showRangerModal, setShowRangerModal] = useState<{targetId: number; roleId: string | null} | null>(null); // 巡山人变身落难少女
   const [showDamselGuessModal, setShowDamselGuessModal] = useState<{minionId: number | null; targetId: number | null} | null>(null); // 爪牙猜测落难少女
-  const [drunkPrompted, setDrunkPrompted] = useState(false); // 是否已提示酒鬼伪装
   const [showNightOrderModal, setShowNightOrderModal] = useState(false); // 首夜叫醒顺位预览
   const [nightOrderPreview, setNightOrderPreview] = useState<{ roleName: string; seatNo: number; order: number }[]>([]);
   const [pendingNightQueue, setPendingNightQueue] = useState<Seat[] | null>(null);
@@ -2243,6 +2247,7 @@ export default function Home() {
         hasBeenNominated: false,
         isDemonSuccessor: false, 
         hasAbilityEvenDead: false,
+        hasGhostVote: true,
         statusDetails: [],
         statuses: [],
         grandchildId: null,
@@ -2264,16 +2269,6 @@ export default function Home() {
       }
     };
   }, []);
-
-  // setup 阶段自动提示酒鬼伪装
-  useEffect(() => {
-    if (gamePhase !== 'setup') return;
-    const drunkSeat = seats.find(s => s.role?.id === 'drunk' && (!s.charadeRole || s.charadeRole.type !== 'townsfolk'));
-    if (drunkSeat && showDrunkModal === null && !drunkPrompted) {
-      setDrunkPrompted(true);
-      setShowDrunkModal(drunkSeat.id);
-    }
-  }, [gamePhase, seats, showDrunkModal, drunkPrompted]);
 
   useEffect(() => { 
     setTimer(0); 
@@ -2388,10 +2383,40 @@ export default function Home() {
 
   const cleanStatusesForNewDay = useCallback(() => {
     setSeats(prev => prev.map(s => {
+      // 清除仅限夜晚的状态
       const remaining = (s.statuses || []).filter(status => 
         status.effect === 'ExecutionProof' || status.duration !== 'Night'
       );
-      return { ...s, statuses: remaining };
+      
+      // 清除临时中毒状态（普克造成的除外）
+      const filteredStatusDetails = (s.statusDetails || []).filter(st => {
+        // 保留永久中毒标记
+        if (st.includes('永久中毒') || st.includes('永久')) return true;
+        // 保留普卡中毒（普卡的中毒会在夜晚时自动处理死亡）
+        if (st.includes('普卡中毒')) return true;
+        // 清除所有带"至下个黄昏"、"下个黄昏清除"、"次日黄昏清除"的临时中毒标记
+        if (st.includes('至下个黄昏') || st.includes('下个黄昏清除') || st.includes('次日黄昏清除')) {
+          // 检查是否是普卡中毒
+          if (st.includes('普卡中毒')) return true;
+          return false; // 清除其他临时中毒
+        }
+        // 保留其他标记（如"下一夜死亡时"、"下一个善良玩家被处决时"等特殊清除条件）
+        return true;
+      });
+      
+      // 重新计算中毒状态
+      const poisonedAfterClean = computeIsPoisoned({
+        ...s,
+        statusDetails: filteredStatusDetails,
+        statuses: remaining,
+      });
+      
+      return { 
+        ...s, 
+        statuses: remaining,
+        statusDetails: filteredStatusDetails,
+        isPoisoned: poisonedAfterClean
+      };
     }));
   }, []);
 
@@ -3008,6 +3033,53 @@ export default function Home() {
         }
       }
     }
+    // 如果存在男爵，自动进行+2 外来者 / -2 镇民的重平衡
+    const autoRebalanceForBaron = (seatsToAdjust: Seat[]): Seat[] => {
+      const hasBaron = seatsToAdjust.some(s => s.role?.id === 'baron');
+      if (!hasBaron) return seatsToAdjust;
+
+      const outsiders = seatsToAdjust.filter(s => s.role?.type === 'outsider');
+      const townsfolks = seatsToAdjust.filter(s => s.role?.type === 'townsfolk');
+      if (townsfolks.length < 2) return seatsToAdjust; // 保护性检查
+
+      const usedIds = new Set<string>(seatsToAdjust.map(s => s.role?.id).filter(Boolean) as string[]);
+      const outsiderPool = (filteredGroupedRoles['outsider'] || groupedRoles['outsider'] || roles.filter(r => r.type === 'outsider'))
+        .filter(r => !usedIds.has(r.id));
+
+      const pickRole = (): Role | null => {
+        if (outsiderPool.length === 0) return null;
+        const [next, ...rest] = outsiderPool;
+        outsiderPool.splice(0, 1);
+        return next;
+      };
+
+      let nextSeats = [...seatsToAdjust];
+      const targets = townsfolks.slice(0, 2); // 需要替换的两个镇民
+      targets.forEach(target => {
+        const newRole = pickRole();
+        if (!newRole) return;
+        nextSeats = nextSeats.map(s =>
+          s.id === target.id
+            ? {
+                ...s,
+                role: newRole,
+                charadeRole: null,
+                isDrunk: newRole.id === 'drunk',
+                isPoisoned: false,
+                isRedHerring: false,
+                isFortuneTellerRedHerring: false,
+                statusDetails: [],
+                statuses: [],
+              }
+            : s
+        );
+      });
+
+      addLog('检测到【男爵】，已自动将 2 名镇民改为外来者以满足配置。');
+      return nextSeats;
+    };
+
+    updatedCompact = autoRebalanceForBaron(updatedCompact);
     
     proceedToCheckPhase(updatedCompact);
   };
@@ -3190,8 +3262,20 @@ export default function Home() {
         return true;
       });
       
+      // 清除水手/旅店老板造成的醉酒状态（这些状态持续到"下个黄昏"，进入夜晚时清除）
+      const filteredStatusDetailsForDrunk = filteredStatusDetails.filter(st => {
+        // 清除水手/旅店老板造成的醉酒标记（这些标记包含"至下个黄昏清除"）
+        if (st.includes('水手致醉') || st.includes('旅店老板致醉')) {
+          // 检查是否包含"至下个黄昏"清除时间
+          if (st.includes('至下个黄昏') || st.includes('下个黄昏清除')) {
+            return false; // 清除这些标记
+          }
+        }
+        return true; // 保留其他标记
+      });
+      
       // 检查是否应该保留酒鬼状态（永久酒鬼角色或没有临时酒鬼标记）
-      const hasTemporaryDrunk = (s.statusDetails || []).some(d => 
+      const hasTemporaryDrunk = filteredStatusDetailsForDrunk.some(d => 
         d.includes('心上人致醉') || d.includes('莽夫使其醉酒') || 
         d.includes('水手致醉') || d.includes('旅店老板致醉') || 
         d.includes('侍臣致醉') || d.includes('哲学家致醉') || 
@@ -3201,14 +3285,14 @@ export default function Home() {
       
       const poisonedAfterClean = computeIsPoisoned({
         ...s,
-        statusDetails: filteredStatusDetails,
+        statusDetails: filteredStatusDetailsForDrunk,
         statuses: filteredStatuses,
       });
       
       return {
         ...s, 
         statuses: filteredStatuses,
-        statusDetails: filteredStatusDetails,
+        statusDetails: filteredStatusDetailsForDrunk,
         isPoisoned: poisonedAfterClean,
         isDrunk: keepDrunk,
         isProtected: false,
@@ -4314,6 +4398,11 @@ export default function Home() {
       // 茶艺师动态保护：实时计算邻座是否提供保护
       if (hasTeaLadyProtection(targetSeat, seatsSnapshot)) {
         addLog(`${targetId + 1}号 被茶艺师保护，未死亡`);
+        setShowAttackBlockedModal({
+          targetId,
+          reason: '茶艺师保护',
+          demonName: nightInfo ? getDemonDisplayName(nightInfo.effectiveRole.id, nightInfo.effectiveRole.name) : undefined,
+        });
         return;
       }
 
@@ -4508,26 +4597,31 @@ export default function Home() {
       (!target.isDead || (target.role?.id === 'zombuul' && target.isFirstDeathForZombuul && !target.isZombuulTrulyDead));
 
     // 如果因为保护或士兵能力导致无法杀死（且目标存活），添加统一日志说明
-    if (target && !target.isDead && !canBeKilled) {
-      const demonName = getDemonDisplayName(nightInfo.effectiveRole.id, nightInfo.effectiveRole.name);
-      let protectionReason = '';
-      
-      if (target.role?.id === 'soldier') {
-        protectionReason = '士兵能力';
-      } else if (isEffectivelyProtected) {
-        protectionReason = '僧侣保护';
-      } else if (teaLadyProtected) {
-        protectionReason = '茶艺师保护';
-      }
-      
-      if (protectionReason) {
-        addLogWithDeduplication(
-          `小恶魔选择了 ${targetId+1} 号，但因为【${protectionReason}】，${targetId+1} 号没有死亡。今晚依然可能是平安夜。`,
-          nightInfo.seat.id,
-          demonName
-        );
-      }
+  if (target && !target.isDead && !canBeKilled) {
+    const demonName = getDemonDisplayName(nightInfo.effectiveRole.id, nightInfo.effectiveRole.name);
+    let protectionReason = '';
+    
+    if (target.role?.id === 'soldier') {
+      protectionReason = '士兵能力';
+    } else if (isEffectivelyProtected) {
+      protectionReason = '僧侣保护';
+    } else if (teaLadyProtected) {
+      protectionReason = '茶艺师保护';
     }
+    
+    if (protectionReason) {
+      addLogWithDeduplication(
+        `恶魔(${demonName}) 攻击 ${targetId+1}号，但因为【${protectionReason}】，${targetId+1}号没有死亡。`,
+        nightInfo.seat.id,
+        demonName
+      );
+      setShowAttackBlockedModal({
+        targetId,
+        reason: protectionReason,
+        demonName,
+      });
+    }
+  }
 
     // 市长特殊处理：允许死亡转移
     if (canBeKilled && !options.skipMayorRedirectCheck && target.role?.id === 'mayor') {
@@ -4619,7 +4713,7 @@ export default function Home() {
     const targetId = showKillConfirmModal;
     const impSeat = nightInfo.seat;
     
-    // 如果小恶魔选择自己，触发身份转移
+    // 如果小恶魔选择自己，触发身份转移或自杀结算
     if (targetId === impSeat.id && nightInfo.effectiveRole.id === 'imp') {
       // 找到所有活着的爪牙
       const aliveMinions = seats.filter(s => 
@@ -4658,16 +4752,12 @@ export default function Home() {
           return updatedSeats;
         });
         
+        // 正常传位给爪牙（小恶魔自杀时，优先传位给爪牙，不检查红唇女郎）
         // 检查游戏结束（不应该结束，因为新小恶魔还在）
-        // 使用setTimeout确保状态更新后再检查
         setTimeout(() => {
           const currentSeats = seatsRef.current || updatedSeats;
           checkGameOver(currentSeats);
         }, 0);
-        
-        // 记录原小恶魔的死亡
-        setDeadThisNight(p => [...p, impSeat.id]);
-        enqueueRavenkeeperIfNeeded(impSeat.id);
         
         if (nightInfo) {
           addLogWithDeduplication(
@@ -4681,9 +4771,24 @@ export default function Home() {
           console.warn(`%c请立即唤醒 ${newImp.id+1}号玩家，向其出示"你是小恶魔"卡牌！`, 'color: #FF6B6B; font-size: 16px; font-weight: bold; background: #1a1a1a; padding: 8px;');
           console.warn(`%c注意：新恶魔今晚不行动，从下一夜开始才会进入唤醒队列。`, 'color: #4ECDC4; font-size: 14px; background: #1a1a1a; padding: 5px;');
         }
+        
+        // 记录原小恶魔的死亡
+        setDeadThisNight(p => [...p, impSeat.id]);
+        enqueueRavenkeeperIfNeeded(impSeat.id);
       } else {
-        // 如果没有活着的爪牙，小恶魔不能选择自己
-        alert("场上没有活着的爪牙，无法转移身份");
+        // 如果没有活着的爪牙，小恶魔自杀但无法传位：直接死亡，结算游戏
+        addLogWithDeduplication(
+          `${impSeat.id+1}号(小恶魔) 选择自己，但场上无爪牙可传位 —— ${impSeat.id+1}号直接死亡`,
+          impSeat.id,
+          '小恶魔'
+        );
+        // 使用通用杀人流程，触发死亡与游戏结束判定
+        killPlayer(impSeat.id, {
+          onAfterKill: (latestSeats) => {
+            const finalSeats = latestSeats && latestSeats.length ? latestSeats : (seatsRef.current || seats);
+            checkGameOver(finalSeats, impSeat.id);
+          }
+        });
         setShowKillConfirmModal(null);
         return;
       }
@@ -5264,6 +5369,17 @@ export default function Home() {
       const isFirstNomination = virginOverride?.isFirstTime ?? !target.hasBeenNominated;
       const currentSeats = seats;
 
+      // 首次提名且未提供说书人确认时，先弹窗询问提名者是否为镇民
+      if (!virginOverride && isFirstNomination) {
+        setVirginGuideInfo({
+          targetId: id,
+          nominatorId: sourceId,
+          isFirstTime: true,
+          nominatorIsTownsfolk: false,
+        });
+        return;
+      }
+
       if (!isFirstNomination) {
         const updatedSeats = currentSeats.map(s =>
           s.id === id ? { ...s, hasBeenNominated: true, hasUsedVirginAbility: true } : s
@@ -5475,6 +5591,7 @@ export default function Home() {
       ...seat,
       isEvilConverted: false,
       isZombuulTrulyDead: seat.isZombuulTrulyDead,
+      hasGhostVote: true,
     });
   }, []);
 
@@ -7091,6 +7208,20 @@ export default function Home() {
                         ) : (
                           <span className="text-gray-500">无特殊状态</span>
                         )}
+                        {s.isDead && (
+                          <button
+                            type="button"
+                            onClick={() => setSeats(p => p.map(x => x.id === s.id ? { ...x, hasGhostVote: x.hasGhostVote === false ? true : false } : x))}
+                            className={`px-2 py-0.5 rounded border text-[11px] ${
+                              s.hasGhostVote === false
+                                ? 'bg-gray-700 border-gray-600 text-gray-400'
+                                : 'bg-indigo-900/60 border-indigo-500 text-indigo-100'
+                            }`}
+                            title="死者票：点击切换已用/未用"
+                          >
+                            死者票{(s.hasGhostVote === false) ? '（已用）' : ''}
+                          </button>
+                        )}
                         {s.hasUsedSlayerAbility && (
                           <span className="px-2 py-0.5 rounded bg-red-900/60 text-red-200 border border-red-700">猎手已用</span>
                         )}
@@ -7128,6 +7259,38 @@ export default function Home() {
                   {currentHint.speak}
                 </p>
               </div>
+
+              {(() => {
+                const hasPendingModal = [
+                  showKillConfirmModal,
+                  showPoisonConfirmModal,
+                  showPoisonEvilConfirmModal,
+                  showHadesiaKillConfirmModal,
+                  showRavenkeeperResultModal,
+                  showRavenkeeperFakeModal,
+                  showMoonchildKillModal,
+                  showSweetheartDrunkModal,
+                  showKlutzChoiceModal,
+                ].some(v => v !== null);
+                return (
+                  <div className="flex justify-center">
+                    <button
+                      disabled={hasPendingModal}
+                      onClick={() => {
+                        if (hasPendingModal) return;
+                        continueToNextAction();
+                      }}
+                      className={`w-full md:w-2/3 lg:w-1/2 py-4 text-xl font-bold rounded-2xl border-2 transition ${
+                        hasPendingModal
+                          ? 'bg-gray-700 border-gray-600 text-gray-400 cursor-not-allowed'
+                          : 'bg-blue-700 hover:bg-blue-600 border-blue-400 text-white shadow-lg shadow-blue-500/20'
+                      }`}
+                    >
+                      下一位角色
+                    </button>
+                  </div>
+                );
+              })()}
                       
               {nightInfo.effectiveRole.nightActionType === 'spy_info' && (
                 <div className="bg-black/50 p-3 rounded-xl h-56 overflow-y-auto text-xs flex gap-3">
@@ -7443,7 +7606,15 @@ export default function Home() {
                 onClick={confirmNightOrderPreview}
                 className="flex-1 py-3 rounded-xl bg-yellow-500 text-black font-bold hover:bg-yellow-400 transition"
               >
-                确认，进入首夜
+                确认，进入夜晚
+              </button>
+            </div>
+            <div className="pt-1">
+              <button
+                onClick={confirmNightOrderPreview}
+                className="w-full py-3 rounded-xl bg-green-600 text-white font-bold hover:bg-green-500 transition"
+              >
+                确认
               </button>
             </div>
           </div>
@@ -7536,6 +7707,16 @@ export default function Home() {
             <h3 className="text-3xl font-bold mb-4">🗳️ 输入票数</h3>
             <div className="mb-6 p-3 bg-yellow-900/30 border border-yellow-700/50 rounded-lg text-sm text-yellow-200">
               <p className="font-semibold">注意：请自行确保每名死亡玩家在本局只使用一次"死人票"。本工具不会替你追踪死人票次数。</p>
+              {(() => {
+                const ghostHolders = seats
+                  .filter(s => s.isDead && s.hasGhostVote !== false)
+                  .map(s => `${s.id + 1}号`);
+                return (
+                  <div className="mt-2 text-xs text-yellow-100">
+                    场上仍有死者票的玩家：{ghostHolders.length ? ghostHolders.join('、') : '无'}
+                  </div>
+                );
+              })()}
             </div>
             <input 
               autoFocus 
@@ -7644,7 +7825,7 @@ export default function Home() {
                   }
                   // 麻脸巫婆：仅显示当前剧本的角色，方便查阅
                   if (selectedScript) {
-                    return r.script === selectedScript;
+                    return r.script === selectedScript.name;
                   }
                   return true;
                 })
@@ -8915,6 +9096,28 @@ export default function Home() {
       )}
 
       {/* 麻脸巫婆变更角色弹窗 */}
+      {showAttackBlockedModal && (
+        <div className="fixed inset-0 z-[5000] bg-black/80 flex items-center justify-center px-4">
+          <div className="bg-gray-900 border-4 border-green-500 rounded-2xl p-6 max-w-md w-full space-y-4 text-center">
+            <h2 className="text-3xl font-bold text-green-300">⚔️ 攻击无效</h2>
+            <div className="text-gray-100 text-lg">
+              {showAttackBlockedModal.demonName
+                ? `恶魔【${showAttackBlockedModal.demonName}】攻击 ${showAttackBlockedModal.targetId + 1}号，但因为【${showAttackBlockedModal.reason}】，该玩家未死亡。`
+                : `${showAttackBlockedModal.targetId + 1}号因【${showAttackBlockedModal.reason}】未受到本次攻击的影响。`}
+            </div>
+            <div className="text-xs text-gray-400">
+              请根据规则继续进行后续流程。本弹窗仅作提示，不会影响结算。
+            </div>
+            <button
+              className="w-full py-3 bg-green-600 hover:bg-green-500 rounded-xl text-xl font-bold"
+              onClick={() => setShowAttackBlockedModal(null)}
+            >
+              知道了
+            </button>
+          </div>
+        </div>
+      )}
+
       {showPitHagModal && (
         <div className="fixed inset-0 z-[5000] bg-black/80 flex items-center justify-center px-4">
           <div className="bg-gray-800 border-4 border-purple-500 rounded-2xl p-6 max-w-xl w-full space-y-4">

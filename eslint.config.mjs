@@ -3,11 +3,12 @@ import { defineConfig, globalIgnores } from "eslint/config";
 import js from "@eslint/js";
 import tsParser from "@typescript-eslint/parser";
 import tsPlugin from "@typescript-eslint/eslint-plugin";
-import nextPlugin from "@next/eslint-plugin-next";
+import nextConfig from "eslint-config-next";
 import globals from "globals";
 
 export default defineConfig([
   js.configs.recommended,
+  ...nextConfig,
   {
     files: ["**/*.{ts,tsx,js,jsx}"],
     languageOptions: {
@@ -26,11 +27,9 @@ export default defineConfig([
     },
     plugins: {
       "@typescript-eslint": tsPlugin,
-      "@next/next": nextPlugin,
     },
     rules: {
       ...tsPlugin.configs.recommended.rules,
-      ...nextPlugin.configs["core-web-vitals"].rules,
       "@typescript-eslint/no-unused-vars": "off",
       "@typescript-eslint/no-explicit-any": "off",
       "no-constant-condition": ["error", { checkLoops: false }],

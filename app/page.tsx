@@ -2168,6 +2168,35 @@ export default function Home() {
   const [showRestoreGameModal, setShowRestoreGameModal] = useState(false); // 恢复游戏提示弹窗
   const [hasRestoredFromCache, setHasRestoredFromCache] = useState(false); // 是否已从缓存恢复
 
+  // 失忆者开局赋能：避免多次弹窗
+  const amnesiacPromptedRef = useRef(false);
+
+  // 当进入“核对身份”阶段且场上存在尚未赋能的失忆者时，自动弹出赋能弹窗
+  useEffect(() => {
+    if (gamePhase !== 'check') {
+      // 离开核对阶段时重置标记，方便重开时再次触发
+      amnesiacPromptedRef.current = false;
+      return;
+    }
+
+    const amnesiacSeats = seats.filter(s => s.role?.id === 'amnesiac');
+    if (amnesiacSeats.length === 0) return;
+
+    const hasPendingAmnesiac = amnesiacSeats.some(s => !s.amnesiacAbilityId);
+    if (!hasPendingAmnesiac) return;
+    if (amnesiacPromptedRef.current) return;
+
+    const initialSelections: Record<number, string> = {};
+    amnesiacSeats.forEach(s => {
+      if (s.amnesiacAbilityId) {
+        initialSelections[s.id] = s.amnesiacAbilityId;
+      }
+    });
+    setAmnesiacAbilitySelections(initialSelections);
+    setShowAmnesiacAbilityModal(true);
+    amnesiacPromptedRef.current = true;
+  }, [gamePhase, seats]);
+
   const seatsRef = useRef(seats);
   const fakeInspectionResultRef = useRef<string | null>(null);
   const consoleContentRef = useRef<HTMLDivElement>(null);
@@ -5170,26 +5199,26 @@ export default function Home() {
     // 如果攻击被阻挡（未杀死任何人），显示弹窗并记录日志
     if (deadIds.length === 0) {
       // 判断阻挡原因
-      let protectionReason = '';
+        let protectionReason = '';
       if (target.role?.id === 'soldier' && !target.isPoisoned && !target.isDrunk) {
-        protectionReason = '士兵能力';
+          protectionReason = '士兵能力';
       } else if (protectiveActions.some(p => p.targetId === targetId && p.roleId === 'monk')) {
-        protectionReason = '僧侣保护';
+          protectionReason = '僧侣保护';
       } else if (hasTeaLadyProtection(target, seatsSnapshot)) {
-        protectionReason = '茶艺师保护';
-      }
-      
-      if (protectionReason) {
-        addLogWithDeduplication(
-          `恶魔(${demonName}) 攻击 ${targetId+1}号，但因为【${protectionReason}】，${targetId+1}号没有死亡。`,
-          nightInfo.seat.id,
-          demonName
-        );
-        setShowAttackBlockedModal({
-          targetId,
-          reason: protectionReason,
-          demonName,
-        });
+          protectionReason = '茶艺师保护';
+        }
+        
+        if (protectionReason) {
+          addLogWithDeduplication(
+            `恶魔(${demonName}) 攻击 ${targetId+1}号，但因为【${protectionReason}】，${targetId+1}号没有死亡。`,
+            nightInfo.seat.id,
+            demonName
+          );
+          setShowAttackBlockedModal({
+            targetId,
+            reason: protectionReason,
+            demonName,
+          });
       }
       return 'resolved';
     }

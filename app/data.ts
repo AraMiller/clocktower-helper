@@ -70,7 +70,8 @@ export interface Seat {
   isGrandchild: boolean; // 标记该玩家是否是"祖母的孙子"
   isFirstDeathForZombuul?: boolean; // 僵怖首次死亡标记（首次死亡后仍可发动技能，第二次被处决才真正死亡）
   isZombuulTrulyDead?: boolean; // 僵怖真正死亡标记（第二次被处决后）
-  zombuulLives?: number; // 僵怖剩余可“假死”次数（默认1）
+  zombuulLives?: number; // 僵怖剩余可"假死"次数（默认1）
+  amnesiacAbilityId?: string; // 失忆者：说书人赋予的隐藏角色ID，用于夜晚行动顺序和能力代理
 }
 
 export interface LogEntry {

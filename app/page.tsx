@@ -1,8 +1,9 @@
 "use client";
 
 import { useState, useEffect, useRef, useMemo, useCallback } from "react";
-import { roles, Role, Seat, StatusEffect, LogEntry, GamePhase, WinResult, groupedRoles, typeLabels, typeColors, typeBgColors, RoleType, scripts, Script } from "./data";
-import { calculateNightDeaths, shouldTriggerMayorBounce, checkGameOver as engineCheckGameOver, checkVortoxActive } from "./engine";
+import { allRoles, roles, Role, Seat, StatusEffect, LogEntry, GamePhase, WinResult, groupedRoles, typeLabels, typeColors, typeBgColors, RoleType, scripts, Script, getRolesByScript, getAllRoles, getRoleById } from "./data";
+import { calculateNightDeaths, shouldTriggerMayorBounce, checkGameOver as engineCheckGameOver, checkVortoxActive, calculateGameResult, setupGame } from "./engine";
+import { useGameInteraction } from "./useGameInteraction";
 
 // --- 辅助类型 ---
 interface NightHintState { 
@@ -100,7 +101,8 @@ const getSeatPosition = (index: number, total: number = 15, isPortrait: boolean 
     return { x: x.toFixed(2), y: y.toFixed(2) };
   } else {
     // 横屏时使用圆形布局
-    const radius = 55; // 增大半径，增加座位间距，避免遮挡
+    // 放大圆半径以拉开 15 人局的间距，减少重叠
+    const radius = 48;
     const x = 50 + radius * Math.cos(angle);
     const y = 50 + radius * Math.sin(angle);
     return { x: x.toFixed(2), y: y.toFixed(2) };
@@ -1617,7 +1619,7 @@ const calculateNightInfo = (
       action = "无行动";
     }
   } else if (effectiveRole.id === 'amnesiac') {
-    // 失意者：每个白天可以询问说书人一次猜测
+    // 失忆者：每个白天可以询问说书人一次猜测
     guide = "🧠 每个白天，你可以询问说书人一次猜测，你会得知你的猜测有多准确。"; 
     speak = '"每个白天，你可以询问说书人一次猜测，你会得知你的猜测有多准确。"'; 
     action = "告知";
@@ -1810,7 +1812,7 @@ const calculateNightInfo = (
         action = "展示";
       }
     } else {
-      guide = "⚔️ 选择三名玩家（所有玩家都会得知你选择了谁）：他们秘密决定自己的命运，如果他们全部存活，他们全部死亡。"; 
+      guide = "⚔️ 选择三名玩家（所有玩家都会得知你选择了谁）：他们秘密决定自己的命运，如果他们全部存活，他们全部死亡。\n\n💀 哈迪寂亚助手：请选择 3 名玩家，并询问他们选择'生'还是'死'。如果所有人都选择'生'，则全部死亡。如果至少一人选择'死'，则只有选择'死'的玩家死亡。"; 
       speak = '"请选择三名玩家。所有玩家都会得知你选择了谁。他们秘密决定自己的命运，如果他们全部存活，他们全部死亡。"'; 
         action = "kill";
     }
@@ -1977,6 +1979,9 @@ export default function Home() {
   //      STATE 定义 (完整，前置)
   // ===========================
   const [mounted, setMounted] = useState(false);
+  
+  // 使用统一的 allRoles（已经在 data.ts 中去重）
+  const uniqueRoles = allRoles;
   const [showIntroLoading, setShowIntroLoading] = useState(true); // Intro 加载动画（不属于具体剧本）
   const [isPortrait, setIsPortrait] = useState(false); // 是否为竖屏设备
   const [seats, setSeats] = useState<Seat[]>([]);
@@ -1984,6 +1989,11 @@ export default function Home() {
   
   const [gamePhase, setGamePhase] = useState<GamePhase>("scriptSelection");
   const [selectedScript, setSelectedScript] = useState<Script | null>(null);
+  const [showScriptBuilder, setShowScriptBuilder] = useState(false);
+  const [customSelectedIds, setCustomSelectedIds] = useState<string[]>([]);
+  const [customSelectedRoles, setCustomSelectedRoles] = useState<Role[]>([]);
+  const [customSearch, setCustomSearch] = useState("");
+  const [customTypeFilter, setCustomTypeFilter] = useState<RoleType | "all">("all");
   const [nightCount, setNightCount] = useState(1);
   const [deadThisNight, setDeadThisNight] = useState<number[]>([]); // 改为存储玩家ID
   const [executedPlayerId, setExecutedPlayerId] = useState<number | null>(null);
@@ -2202,7 +2212,7 @@ export default function Home() {
   const consoleContentRef = useRef<HTMLDivElement>(null);
   const currentActionTextRef = useRef<HTMLSpanElement>(null);
   const moonchildChainPendingRef = useRef(false);
-  const longPressTimerRef = useRef<Map<number, NodeJS.Timeout>>(new Map()); // 存储每个座位的长按定时器
+  const longPressTimerRef = useRef<Map<number, NodeJS.Timeout>>(new Map()); // 存储每个座位的长按定时器（保留用于兼容性，但主要使用Hook）
   const registrationCacheRef = useRef<Map<string, RegistrationResult>>(new Map()); // 同夜查验结果缓存
   const registrationCacheKeyRef = useRef<string>('');
 
@@ -2225,18 +2235,66 @@ export default function Home() {
     [spyDisguiseMode, spyDisguiseProbability, gamePhase, nightCount]
   );
 
-  // 根据selectedScript过滤角色的辅助函数
+  // 根据selectedScript过滤角色的辅助函数（使用新的剧本结构）
   const getFilteredRoles = useCallback((roleList: Role[]): Role[] => {
     if (!selectedScript) return [];
-    return roleList.filter(r => 
-      !r.script || 
-      r.script === selectedScript.name ||
-      (selectedScript.id === 'trouble_brewing' && !r.script) ||
-      (selectedScript.id === 'bad_moon_rising' && (!r.script || r.script === '暗月初升')) ||
-      (selectedScript.id === 'sects_and_violets' && (!r.script || r.script === '梦陨春宵')) ||
-      (selectedScript.id === 'midnight_revelry' && (!r.script || r.script === '夜半狂欢'))
-    );
-  }, [selectedScript]);
+    // 自定义剧本：使用手选池
+    if (selectedScript.id === 'custom') {
+      return customSelectedRoles;
+    }
+    // 标准剧本：按剧本 ID 过滤
+    const scriptRoles = getRolesByScript(selectedScript.id);
+    const scriptRoleIds = new Set(scriptRoles.map(r => r.id));
+    return roleList.filter(r => scriptRoleIds.has(r.id));
+  }, [selectedScript, customSelectedRoles]);
+
+  const customScriptMeta = useMemo(() => ({
+    id: 'custom',
+    name: '自定义剧本',
+    difficulty: '混搭'
+  }), []);
+
+  const scriptCards = useMemo(() => [...scripts, customScriptMeta], [customScriptMeta]);
+
+  const customRolePool = useMemo(() => {
+    const keyword = customSearch.trim();
+    return getAllRoles()
+      .filter(r => customTypeFilter === 'all' ? true : r.type === customTypeFilter)
+      .filter(r => {
+        if (!keyword) return true;
+        return r.name.includes(keyword) || r.ability.includes(keyword) || (r.fullDescription || '').includes(keyword);
+      });
+  }, [customSearch, customTypeFilter]);
+
+  const groupedCustomRolePool = useMemo(() => {
+    const groups: Record<RoleType, Role[]> = {
+      townsfolk: [],
+      outsider: [],
+      minion: [],
+      demon: []
+    };
+    customRolePool.forEach(r => {
+      groups[r.type]?.push(r);
+    });
+    return groups;
+  }, [customRolePool]);
+
+  useEffect(() => {
+    const resolved = customSelectedIds
+      .map(id => getRoleById(id))
+      .filter((r): r is Role => Boolean(r));
+    setCustomSelectedRoles(resolved);
+  }, [customSelectedIds]);
+
+  const customSelectionCounts = useMemo(() => {
+    const base: Record<RoleType, number> = { townsfolk: 0, outsider: 0, minion: 0, demon: 0 };
+    customSelectedRoles.forEach(r => { base[r.type] += 1; });
+    return base;
+  }, [customSelectedRoles]);
+
+  const toggleCustomRole = useCallback((roleId: string) => {
+    setCustomSelectedIds(prev => prev.includes(roleId) ? prev.filter(id => id !== roleId) : [...prev, roleId]);
+  }, []);
 
   const hasUsedAbility = useCallback((roleId: string, seatId: number) => {
     return (usedOnceAbilities[roleId] || []).includes(seatId);
@@ -2276,16 +2334,27 @@ export default function Home() {
     });
   }, [nightCount]);
 
-  // 根据selectedScript过滤后的groupedRoles
+  // 根据selectedScript过滤后的groupedRoles（去重处理）
   const filteredGroupedRoles = useMemo(() => {
     if (!selectedScript) return {} as Record<string, Role[]>;
-    const filtered = getFilteredRoles(roles);
-    return filtered.reduce((acc, role) => {
+    // 使用去重后的 uniqueRoles 而不是原始的 roles
+    const filtered = getFilteredRoles(uniqueRoles);
+    
+    // 使用Map去重，确保每个角色id只出现一次（保留第一个出现的）
+    const uniqueRolesMap = new Map<string, Role>();
+    filtered.forEach(role => {
+      if (!uniqueRolesMap.has(role.id)) {
+        uniqueRolesMap.set(role.id, role);
+      }
+    });
+    const uniqueFilteredRoles = Array.from(uniqueRolesMap.values());
+    
+    return uniqueFilteredRoles.reduce((acc, role) => {
       if (!acc[role.type]) acc[role.type] = [];
       acc[role.type].push(role);
       return acc;
     }, {} as Record<string, Role[]>);
-  }, [selectedScript, getFilteredRoles]);
+  }, [selectedScript, getFilteredRoles, uniqueRoles]);
   const introTimeoutRef = useRef<any>(null);
   
   // 历史记录用于"上一步"功能
@@ -3699,6 +3768,16 @@ export default function Home() {
       const r = s.role?.id === 'drunk' ? s.charadeRole : s.role;
       const roleId = r?.id;
       const diedTonight = nightlyDeaths.includes(s.id);
+      
+      // 失忆者能力代理：如果有隐藏能力，使用隐藏角色进行判断
+      let effectiveRoleForCheck = r;
+      if (s.role?.id === 'amnesiac' && s.amnesiacAbilityId) {
+        const hiddenRole = roles.find(role => role.id === s.amnesiacAbilityId);
+        if (hiddenRole) {
+          effectiveRoleForCheck = hiddenRole;
+        }
+      }
+      
       // 6. 跳过在夜晚死亡的玩家（小恶魔杀害的玩家），但守鸦人死亡的当晚需要被唤醒，亡骨魔杀死的爪牙（保留能力）也需要被唤醒
       // 僵怖假死状态（isFirstDeathForZombuul=true）也需要被唤醒
       if (roleId === 'ravenkeeper' && !diedTonight) {
@@ -3709,22 +3788,23 @@ export default function Home() {
       }
       // 送葬者：如果上一个黄昏没有处决，不应该被唤醒
       // 注意：日志已在startNight函数中添加（在构建队列之前），这里不需要重复添加
-      if (r?.id === 'undertaker' && !isFirst && previousDuskExecution === null) {
+      if (effectiveRoleForCheck?.id === 'undertaker' && !isFirst && previousDuskExecution === null) {
         return false;
       }
       // 僵怖：如果上一个黄昏有处决，不应该被唤醒（只有在白天没有人死亡时才被唤醒）
-      if (r?.id === 'zombuul' && !isFirst && previousDuskExecution !== null) {
+      if (effectiveRoleForCheck?.id === 'zombuul' && !isFirst && previousDuskExecution !== null) {
         return false;
       }
       // 气球驾驶员：四种类型都已知后不再唤醒
-      if (r?.id === 'balloonist') {
+      if (effectiveRoleForCheck?.id === 'balloonist') {
         const known = balloonistKnownTypes[s.id] || [];
         const allTypesKnown = ['镇民','外来者','爪牙','恶魔'].every(t => known.includes(t));
         if (allTypesKnown) return false;
         // 首夜也需要按规则给出信息，避免被错误跳过
         if (isFirst) return true;
       }
-      return isFirst ? (r?.firstNightOrder ?? 0) > 0 : (r?.otherNightOrder ?? 0) > 0;
+      // 使用有效角色（失忆者使用隐藏角色）的顺序来判断是否应该被唤醒
+      return isFirst ? (effectiveRoleForCheck?.firstNightOrder ?? 0) > 0 : (effectiveRoleForCheck?.otherNightOrder ?? 0) > 0;
     });
     
     // 若本夜没有任何需要被叫醒的角色，直接进入夜晚结算，避免卡在"正在计算行动..."
@@ -3897,16 +3977,26 @@ export default function Home() {
       }
       if(action === 'protect') {
         if (nightInfo) {
+          // 确定保护者显示名称（失忆者显示为"失忆者(XX角色)"）
+          const protectorSeat = seats.find(s => s.id === nightInfo.seat.id);
+          const isAmnesiac = protectorSeat?.role?.id === 'amnesiac';
+          const hiddenRole = isAmnesiac && protectorSeat?.amnesiacAbilityId 
+            ? roles.find(r => r.id === protectorSeat.amnesiacAbilityId)
+            : null;
+          const protectorDisplayName = isAmnesiac && hiddenRole
+            ? `失忆者(${hiddenRole.name})`
+            : nightInfo.effectiveRole.name;
+          
           // 使用nightInfo.isPoisoned和seats状态双重检查，确保判断准确
           const monkSeat = seats.find(s => s.id === nightInfo.seat.id);
           const isMonkPoisoned = nightInfo.isPoisoned || 
                                  (monkSeat ? (monkSeat.isPoisoned || monkSeat.isDrunk || monkSeat.role?.id === "drunk") : false);
           
-          // 如果僧侣中毒/醉酒，绝对不能设置保护效果，但可以正常选择玩家
+          // 如果保护者中毒/醉酒，绝对不能设置保护效果，但可以正常选择玩家
           if (isMonkPoisoned) {
             // 强制清除所有保护状态，确保不会有任何保护效果
             setSeats(p => p.map(s => {
-              // 如果这个玩家是被当前僧侣保护的，清除保护
+              // 如果这个玩家是被当前保护者保护的，清除保护
               if (s.protectedBy === nightInfo.seat.id) {
                 return {...s, isProtected: false, protectedBy: null};
               }
@@ -3915,9 +4005,9 @@ export default function Home() {
             // 记录日志：选择但无保护效果
             setGameLogs(prev => {
               const filtered = prev.filter(log => 
-                !(log.message.includes(`${nightInfo.seat.id+1}号(僧侣)`) && log.phase === gamePhase)
+                !(log.message.includes(`${nightInfo.seat.id+1}号(${protectorDisplayName})`) && log.phase === gamePhase)
               );
-              return [...filtered, { day: nightCount, phase: gamePhase, message: `${nightInfo.seat.id+1}号(僧侣) 选择保护 ${tid+1}号，但中毒/醉酒状态下无保护效果` }];
+              return [...filtered, { day: nightCount, phase: gamePhase, message: `${nightInfo.seat.id+1}号(${protectorDisplayName}) 选择保护 ${tid+1}号，但中毒/醉酒状态下无保护效果` }];
             });
           } else {
             // 健康状态下正常保护：先清除所有保护，然后只设置目标玩家的保护
@@ -3927,9 +4017,9 @@ export default function Home() {
             });
             setGameLogs(prev => {
               const filtered = prev.filter(log => 
-                !(log.message.includes(`${nightInfo.seat.id+1}号(僧侣)`) && log.phase === gamePhase)
+                !(log.message.includes(`${nightInfo.seat.id+1}号(${protectorDisplayName})`) && log.phase === gamePhase)
               );
-              return [...filtered, { day: nightCount, phase: gamePhase, message: `${nightInfo.seat.id+1}号(僧侣) 保护 ${tid+1}号` }];
+              return [...filtered, { day: nightCount, phase: gamePhase, message: `${nightInfo.seat.id+1}号(${protectorDisplayName}) 保护 ${tid+1}号` }];
             });
           }
         }
@@ -4398,10 +4488,24 @@ export default function Home() {
       const targetSeat = seats.find(s => s.id === targetId);
       const newRole = roles.find(r => r.id === showPitHagModal.roleId);
       if (!targetSeat || !newRole) return;
-      // 不能变成场上已存在的角色
+      
+      // 检查麻脸巫婆是否中毒/醉酒（如果中毒/醉酒，技能失效）
+      const actorSeat = seats.find(s => s.id === nightInfo.seat.id);
+      if (isActorDisabledByPoisonOrDrunk(actorSeat, nightInfo.isPoisoned)) {
+        addLog(`${nightInfo.seat.id+1}号(麻脸巫婆) 处于中毒/醉酒状态，本夜技能失效（无事发生）`);
+        setShowPitHagModal(null);
+        setSelectedActionTargets([]);
+        continueToNextAction();
+        return;
+      }
+      
+      // 如果选择的角色已在场上，无事发生（不执行转换）
       const roleAlreadyInPlay = seats.some(s => getSeatRoleId(s) === newRole.id);
       if (roleAlreadyInPlay) {
-        alert('该角色已在场上，无法变身为已存在角色。');
+        addLog(`${nightInfo.seat.id+1}号(麻脸巫婆) 选择将 ${targetId+1}号 变为 ${newRole.name}，但该角色已在场上，无事发生`);
+        setShowPitHagModal(null);
+        setSelectedActionTargets([]);
+        continueToNextAction();
         return;
       }
 
@@ -4882,9 +4986,12 @@ export default function Home() {
         const targetRoleId = targetSeat.role?.id;
         const isTargetSupported = targetRoleId === 'soldier' || targetRoleId === 'mayor';
         
-        // 检查场上是否有活着的僧侣
+        // 检查场上是否有活着的僧侣（包括失忆者代理的僧侣）
         const hasAliveMonk = seatsSnapshot.some(s => 
-          s.role?.id === 'monk' && !s.isDead
+          !s.isDead && (
+            s.role?.id === 'monk' || 
+            (s.role?.id === 'amnesiac' && s.amnesiacAbilityId === 'monk')
+          )
         );
 
         // 只有当目标是支持的角色，或者场上有活着的僧侣时，才启用引擎
@@ -4903,19 +5010,30 @@ export default function Home() {
         seatsSnapshot.forEach(seat => {
           if (seat.isProtected && seat.protectedBy !== null) {
             const protector = seatsSnapshot.find(s => s.id === seat.protectedBy);
-            if (protector?.role && ENGINE_SUPPORTED_ROLES.includes(protector.role.id as any)) {
-              // 只添加引擎支持的保护角色（保护者存在且有支持的角色）
+            if (protector?.role) {
+              // 失忆者能力代理：如果有隐藏能力，使用隐藏角色的ID
+              let effectiveRoleId = protector.role.id;
+              if (protector.role.id === 'amnesiac' && protector.amnesiacAbilityId) {
+                effectiveRoleId = protector.amnesiacAbilityId;
+              }
+              
+              // 检查是否是引擎支持的保护角色（包括失忆者代理的角色）
+              if (ENGINE_SUPPORTED_ROLES.includes(effectiveRoleId as any) || 
+                  (protector.role.id === 'amnesiac' && protector.amnesiacAbilityId && 
+                   ['monk', 'innkeeper'].includes(effectiveRoleId))) {
               protectiveActions.push({
                 sourceId: protector.id,
                 targetId: seat.id,
-                roleId: protector.role.id,
+                  roleId: effectiveRoleId, // 使用有效角色ID（失忆者使用隐藏角色ID）
               });
+              }
             }
           }
         });
 
         // 调用引擎计算夜晚死亡
-        const deadIds = calculateNightDeaths(seatsSnapshot, demonAction, protectiveActions);
+        const deathResult = calculateNightDeaths(seatsSnapshot, demonAction, protectiveActions);
+        const deadIds = deathResult.deaths;
 
         // 如果引擎返回空列表，说明攻击被阻挡
         if (deadIds.length === 0) {
@@ -5180,21 +5298,62 @@ export default function Home() {
     // 构造保护行动数组（僧侣、旅店老板等）
     const protectiveActions: { sourceId: number; targetId: number; roleId: string }[] = [];
     
-    // 检查僧侣保护
-    const monk = seatsSnapshot.find(s => s.role?.id === 'monk' && !s.isDead);
-    if (monk && monk.protectedBy !== null) {
-      const protectedPlayer = seatsSnapshot.find(s => s.id === monk.protectedBy);
-      if (protectedPlayer) {
-        protectiveActions.push({
-          sourceId: monk.id,
-          targetId: protectedPlayer.id,
-          roleId: 'monk'
-        });
+    // 检查僧侣保护（包括失忆者代理的僧侣）
+    const monks = seatsSnapshot.filter(s => {
+      if (s.isDead) return false;
+      // 真实僧侣
+      if (s.role?.id === 'monk') return true;
+      // 失忆者代理僧侣
+      if (s.role?.id === 'amnesiac' && s.amnesiacAbilityId === 'monk') return true;
+      return false;
+    });
+    
+    monks.forEach(monk => {
+      if (monk.protectedBy !== null) {
+        const protectedPlayer = seatsSnapshot.find(s => s.id === monk.protectedBy);
+        if (protectedPlayer) {
+          // 确定角色ID：失忆者使用隐藏角色ID，真实僧侣使用'monk'
+          const roleId = monk.role?.id === 'amnesiac' && monk.amnesiacAbilityId === 'monk' 
+            ? 'monk' 
+            : 'monk';
+          protectiveActions.push({
+            sourceId: monk.id,
+            targetId: protectedPlayer.id,
+            roleId: roleId
+          });
+        }
       }
-    }
+    });
+    
+    // 检查旅店老板保护（包括失忆者代理的旅店老板）
+    const innkeepers = seatsSnapshot.filter(s => {
+      if (s.isDead) return false;
+      // 真实旅店老板
+      if (s.role?.id === 'innkeeper') return true;
+      // 失忆者代理旅店老板
+      if (s.role?.id === 'amnesiac' && s.amnesiacAbilityId === 'innkeeper') return true;
+      return false;
+    });
+    
+    innkeepers.forEach(innkeeper => {
+      // 旅店老板保护两名玩家，需要从isProtected状态中查找
+      seatsSnapshot.forEach(seat => {
+        if (seat.isProtected && seat.protectedBy === innkeeper.id) {
+          const roleId = innkeeper.role?.id === 'amnesiac' && innkeeper.amnesiacAbilityId === 'innkeeper'
+            ? 'innkeeper'
+            : 'innkeeper';
+          protectiveActions.push({
+            sourceId: innkeeper.id,
+            targetId: seat.id,
+            roleId: roleId
+          });
+        }
+      });
+    });
 
     // 使用引擎计算夜晚死亡
-    const deadIds = calculateNightDeaths(seatsSnapshot, demonAction, protectiveActions);
+    const deathResult = calculateNightDeaths(seatsSnapshot, demonAction, protectiveActions);
+    const deadIds = deathResult.deaths;
 
     // 如果攻击被阻挡（未杀死任何人），显示弹窗并记录日志
     if (deadIds.length === 0) {
@@ -6505,66 +6664,52 @@ export default function Home() {
     setContextMenu({ x: targetX, y: targetY, seatId });
   };
 
-  const handleContextMenu = (e: React.MouseEvent, seatId: number) => { 
-    e.preventDefault(); 
+  // ===== 统一的事件处理：使用 useGameInteraction Hook =====
+  const handleOpenActionMenu = useCallback((seatId: number, event?: React.MouseEvent | React.TouchEvent) => {
     const seat = seats.find(s => s.id === seatId);
+    
+    // 特殊处理：核对身份阶段的酒鬼
     if (gamePhase === 'check' && seat?.role?.id === 'drunk') {
       setShowDrunkModal(seatId);
       return;
     }
-    if (isPortrait) {
-      openContextMenuForSeat(seatId, 'center');
+    
+    // PC端：使用鼠标位置
+    if (event && 'clientX' in event) {
+      setContextMenu({ x: event.clientX, y: event.clientY, seatId });
     } else {
-      setContextMenu({x:e.clientX,y:e.clientY,seatId}); 
+      // 触屏端：居中显示
+      openContextMenuForSeat(seatId, isPortrait ? 'center' : 'seat');
     }
+  }, [seats, gamePhase, isPortrait]);
+
+  // 使用统一的交互Hook
+  const seatInteraction = useGameInteraction({
+    onShortPress: handleSeatClick,
+    onLongPress: handleOpenActionMenu,
+    longPressDuration: 500,
+  });
+
+  const handleContextMenu = (e: React.MouseEvent, seatId: number) => { 
+    e.preventDefault();
+    // 使用统一的Hook处理
+    seatInteraction.onContextMenu(e, seatId);
   };
 
-  // 触屏长按处理：开始长按
+  // 触屏长按处理：开始长按（保留用于视觉反馈）
   const handleTouchStart = (e: React.TouchEvent, seatId: number) => {
-    e.stopPropagation();
-    e.preventDefault();
-    // 清除可能存在的旧定时器
-    const existingTimer = longPressTimerRef.current.get(seatId);
-    if (existingTimer) {
-      clearTimeout(existingTimer);
-    }
+    e.preventDefault(); // 阻止默认行为（如滚动）
     // 添加长按状态，用于视觉反馈
     setLongPressingSeats(prev => new Set(prev).add(seatId));
-    longPressTriggeredRef.current.delete(seatId);
-    // 获取触摸位置
-    const touch = e.touches[0];
-    // 设置0.5秒后触发右键菜单/酒鬼伪装
-    const timer = setTimeout(() => {
-      const seat = seats.find(s => s.id === seatId);
-      if (gamePhase === 'check' && seat?.role?.id === 'drunk') {
-        setShowDrunkModal(seatId);
-      } else {
-        openContextMenuForSeat(seatId, 'center');
-      }
-      longPressTriggeredRef.current.add(seatId);
-      longPressTimerRef.current.delete(seatId);
-      setLongPressingSeats(prev => {
-        const next = new Set(prev);
-        next.delete(seatId);
-        return next;
-      });
-    }, 500);
-    longPressTimerRef.current.set(seatId, timer);
+    // 调用Hook的处理函数
+    seatInteraction.onTouchStart(e, seatId);
   };
 
-  // 触屏长按处理：结束触摸（取消长按）
+  // 触屏长按处理：结束触摸（保留用于视觉反馈）
   const handleTouchEnd = (e: React.TouchEvent, seatId: number) => {
-    e.stopPropagation();
-    e.preventDefault();
-    const timer = longPressTimerRef.current.get(seatId);
-    if (timer) {
-      clearTimeout(timer);
-      longPressTimerRef.current.delete(seatId);
-      // 若未触发长按，视为一次点击（用于触屏落座/选中）
-      if (!longPressTriggeredRef.current.has(seatId)) {
-        handleSeatClick(seatId);
-      }
-    }
+    e.preventDefault(); // 阻止默认行为
+    // 调用Hook的处理函数
+    seatInteraction.onTouchEnd(e, seatId);
     // 清除长按状态
     setLongPressingSeats(prev => {
       const next = new Set(prev);
@@ -6573,15 +6718,11 @@ export default function Home() {
     });
   };
 
-  // 触屏长按处理：触摸移动（取消长按）
+  // 触屏长按处理：触摸移动（保留用于视觉反馈）
   const handleTouchMove = (e: React.TouchEvent, seatId: number) => {
-    e.stopPropagation();
-    e.preventDefault();
-    const timer = longPressTimerRef.current.get(seatId);
-    if (timer) {
-      clearTimeout(timer);
-      longPressTimerRef.current.delete(seatId);
-    }
+    e.preventDefault(); // 阻止默认行为（如滚动）
+    // 调用Hook的处理函数
+    seatInteraction.onTouchMove(e, seatId);
     // 清除长按状态
     setLongPressingSeats(prev => {
       const next = new Set(prev);
@@ -6953,6 +7094,7 @@ export default function Home() {
     }));
   };
 
+
   // 切换剧本：如果游戏正在进行，先结束游戏并保存记录
   const handleSwitchScript = () => {
     // 如果游戏正在进行（不是scriptSelection阶段），先结束游戏并保存记录
@@ -6983,6 +7125,9 @@ export default function Home() {
     triggerIntroLoading();
     setGamePhase('scriptSelection');
     setSelectedScript(null);
+    setShowScriptBuilder(false);
+    setCustomSelectedIds([]);
+    setCustomSelectedRoles([]);
     setNightCount(1);
     setExecutedPlayerId(null);
     setWakeQueueIds([]);
@@ -7114,6 +7259,23 @@ export default function Home() {
     }]);
   };
 
+  const startCustomGame = useCallback(() => {
+    const resolved = setupGame('custom', customSelectedIds);
+    if (resolved.length === 0) {
+      alert('请至少选择一个角色');
+      return;
+    }
+    setCustomSelectedRoles(resolved);
+    setSelectedScript(customScriptMeta);
+    setGameLogs([]);
+    setSeats(createInitialSeats());
+    setInitialSeats([]);
+    setGamePhase('setup');
+    setNightCount(1);
+    saveHistory();
+    setShowScriptBuilder(false);
+  }, [customSelectedIds, customScriptMeta, createInitialSeats, saveHistory]);
+
   // 9.1 控制面板的"上一步"：只退回流程，不改变已生成的信息
   // 支持无限次后退，直到当前夜晚/阶段的开始
   const handleStepBack = () => {
@@ -7233,12 +7395,11 @@ export default function Home() {
   
   return (
     <div 
-      className={`flex ${isPortrait ? 'flex-col' : 'flex-row'} ${isPortrait ? 'min-h-screen' : 'h-screen'} text-white ${isPortrait ? 'overflow-y-auto' : 'overflow-hidden'} relative ${
-        gamePhase==='day'?'bg-sky-900':
-        gamePhase==='dusk'?'bg-stone-900':
-        'bg-gray-950'
-      }`} 
+      className="h-screen w-screen overflow-hidden flex flex-row bg-gray-900 text-white relative"
       onClick={()=>{setContextMenu(null);setShowMenu(false);}}
+      style={{
+        backgroundColor: gamePhase==='day' ? '#0c4a6e' : gamePhase==='dusk' ? '#1c1917' : '#030712'
+      }}
     >
       {/* ===== 通用加载动画（不属于“暗流涌动”等具体剧本） ===== */}
       {showIntroLoading && (
@@ -7389,50 +7550,55 @@ export default function Home() {
           </div>
         );
       })()}
-      {/* ===== 暗流涌动剧本（游戏第一部分）主界面 ===== */}
-      <div className={`${isPortrait ? 'w-full order-2 border-t' : 'w-3/5 h-screen border-r'} relative flex items-center justify-center border-gray-700 ${isPortrait ? 'py-8 min-h-[70vh]' : ''} ${gamePhase !== 'scriptSelection' && checkVortoxActive(seats) ? 'pt-16' : ''}`}>
-        {/* 竖屏时，圆桌容器下移，为顶部按钮留出空间 */}
-        {isPortrait && <div className="absolute top-0 left-0 right-0 h-16"></div>}
-        {/* 2. 万能上一步按钮和伪装身份识别按钮 - 竖屏时移到顶部，避免与圆桌重叠 */}
-        {/* 支持无限次撤回，直到"选择剧本"页面，在"选择剧本"页面无效 */}
-        {gamePhase !== 'scriptSelection' && (
-          <div className={`absolute ${isPortrait ? 'top-2 left-2 right-2 flex-row justify-end' : 'top-4 right-4 flex-col'} z-50 flex gap-2`}>
-            <button
-              onClick={handleGlobalUndo}
-              className={`${isPortrait ? 'px-3 py-1.5 text-xs' : 'px-4 py-2 text-sm'} bg-blue-600 rounded-xl font-bold shadow-lg hover:bg-blue-700 transition-colors`}
-            >
-              <div className={`flex ${isPortrait ? 'flex-row items-center gap-1' : 'flex-col items-center'}`}>
-                <div>⬅️ 万能上一步</div>
-                {!isPortrait && <div className="text-xs font-normal opacity-80">（撤销当前动作）</div>}
+      {/* ===== 左侧：游戏桌台区域 ===== */}
+      <div className="flex-1 h-full relative overflow-hidden">
+        {/* 内部滚动容器 */}
+        <div className="w-full h-full overflow-y-auto">
+          {/* 居中容器 */}
+          <div className="w-full h-full flex items-center justify-center p-4 md:p-8 relative min-h-full">
+            {/* 万能上一步按钮和伪装身份识别按钮 */}
+            {gamePhase !== 'scriptSelection' && (
+              <div className="absolute top-2 right-2 md:top-4 md:right-4 z-50 flex flex-row md:flex-col gap-2">
+                <button
+                  onClick={handleGlobalUndo}
+                  className="px-3 py-1.5 md:px-4 md:py-2 text-xs md:text-sm bg-blue-600 rounded-xl font-bold shadow-lg hover:bg-blue-700 transition-colors"
+                >
+                  <div className="flex flex-row md:flex-col items-center gap-1">
+                    <div>⬅️ 万能上一步</div>
+                    <div className="hidden md:block text-xs font-normal opacity-80">（撤销当前动作）</div>
+                  </div>
+                </button>
+                <button
+                  onClick={() => setShowSpyDisguiseModal(true)}
+                  className="px-3 py-1.5 md:px-4 md:py-2 text-xs md:text-sm bg-purple-600 rounded-xl font-bold shadow-lg hover:bg-purple-700 transition-colors"
+                >
+                  <div className="flex items-center justify-center">
+                    <div>🎭 伪装身份识别</div>
+                  </div>
+                </button>
               </div>
-            </button>
-            <button
-              onClick={() => setShowSpyDisguiseModal(true)}
-              className={`${isPortrait ? 'px-3 py-1.5 text-xs' : 'px-4 py-2 text-sm'} bg-purple-600 rounded-xl font-bold shadow-lg hover:bg-purple-700 transition-colors`}
-            >
-              <div className="flex items-center justify-center">
-                <div>🎭 伪装身份识别</div>
+            )}
+            {/* 阶段名称和计时器 - 提升层级，确保在选择剧本时可见 */}
+            <div className={`absolute pointer-events-none text-center z-10 top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 ${
+              gamePhase === 'scriptSelection' ? 'bg-gray-900/80 backdrop-blur-sm rounded-2xl p-8' : ''
+            }`}>
+              <div className="text-xl md:text-6xl font-bold opacity-50 mb-1 md:mb-4">{phaseNames[gamePhase]}</div>
+              <div className="text-[9px] md:text-xs text-gray-500 opacity-40 mb-0.5 md:mb-2">
+                design by{" "}
+                <span className="font-bold italic">Bai  Gan Group</span>
               </div>
-            </button>
-          </div>
-        )}
-        <div className={`absolute pointer-events-none text-center z-0 ${isPortrait ? 'top-[calc(45%+3rem)]' : 'top-1/2'} left-1/2 -translate-x-1/2 -translate-y-1/2`}>
-          <div className={`${isPortrait ? 'text-xl' : 'text-6xl'} font-bold opacity-50 ${isPortrait ? 'mb-1' : 'mb-4'}`}>{phaseNames[gamePhase]}</div>
-          <div className={`${isPortrait ? 'text-[9px]' : 'text-xs'} text-gray-500 opacity-40 ${isPortrait ? 'mb-0.5' : 'mb-2'}`}>
-            design by{" "}
-            <span className="font-bold italic">Bai  Gan Group</span>
-          </div>
-          {gamePhase==='scriptSelection' && (
-            <div className={`${isPortrait ? 'text-xl' : 'text-5xl'} font-mono text-yellow-300`}>请选择剧本</div>
-          )}
-          {gamePhase!=='setup' && gamePhase!=='scriptSelection' && (
-            <div className={`${isPortrait ? 'text-xl' : 'text-5xl'} font-mono text-yellow-300`}>{formatTimer(timer)}</div>
-          )}
-        </div>
-        <div 
-          ref={seatContainerRef}
-          className={`relative ${isPortrait ? 'w-[80vw] h-[95vw] max-w-[85vw] max-h-[100vw] mt-16' : 'w-[70vmin] h-[70vmin]'}`}>
-              {seats.map((s,i)=>{
+              {gamePhase==='scriptSelection' && (
+                <div className="text-xl md:text-5xl font-mono text-yellow-300">请选择剧本</div>
+              )}
+              {gamePhase!=='setup' && gamePhase!=='scriptSelection' && (
+                <div className="text-xl md:text-5xl font-mono text-yellow-300">{formatTimer(timer)}</div>
+              )}
+            </div>
+            <div 
+              ref={seatContainerRef}
+              className="relative w-full h-full max-w-[80vh] max-h-[80vh] aspect-square mx-auto">
+              {/* 只在游戏已开始（非选择剧本阶段）时显示座位 */}
+              {gamePhase !== 'scriptSelection' && seats.map((s,i)=>{
             const p=getSeatPosition(i, seats.length, isPortrait);
             const displayType = getDisplayRoleType(s);
             const colorClass = displayType ? typeColors[displayType] : 'border-gray-600 text-gray-400';
@@ -7443,64 +7609,69 @@ export default function Home() {
                 ? `${s.charadeRole?.name || s.role?.name} (酒)`
                 : s.isDemonSuccessor && s.role?.id === 'imp'
                   ? `${s.role?.name} (传)`
+                  : s.role?.id === 'amnesiac' && s.amnesiacAbilityId
+                    ? (() => {
+                        const hiddenRole = roles.find(r => r.id === s.amnesiacAbilityId);
+                        return hiddenRole ? `失忆者(${hiddenRole.name})` : s.role?.name || "空";
+                      })()
                   : s.role?.name||"空";
             return (
               <div 
                 key={s.id} 
-                onClick={(e)=>{e.stopPropagation();handleSeatClick(s.id)}} 
-                onContextMenu={(e)=>handleContextMenu(e,s.id)}
-                onTouchStart={(e)=>handleTouchStart(e,s.id)}
-                onTouchEnd={(e)=>handleTouchEnd(e,s.id)}
-                onTouchMove={(e)=>handleTouchMove(e,s.id)}
+                onClick={(e)=>seatInteraction.onClick(e, s.id)} 
+                onContextMenu={(e)=>seatInteraction.onContextMenu(e, s.id)}
+                onTouchStart={(e)=>handleTouchStart(e, s.id)}
+                onTouchEnd={(e)=>handleTouchEnd(e, s.id)}
+                onTouchMove={(e)=>handleTouchMove(e, s.id)}
                 ref={(el)=>{seatRefs.current[s.id]=el}}
                   style={{
                     left:`${p.x}%`,
                     top:`${p.y}%`,
                     transform:'translate(-50%,-50%)',
-                    width: `calc(${isPortrait ? '3rem' : '6rem'} * ${seatScale})`,
-                    height: `calc(${isPortrait ? '3rem' : '6rem'} * ${seatScale})`,
+                    width: `calc(3rem * ${seatScale})`,
+                    height: `calc(3rem * ${seatScale})`,
                     WebkitUserSelect: 'none',
                     userSelect: 'none',
                     touchAction: 'manipulation',
-                  }} 
-                className="absolute flex items-center justify-center"
+                  }}
+                  className="absolute flex items-center justify-center md:w-[15vh] md:h-[15vh] md:min-w-[110px] md:min-h-[110px]"
               >
                 <div
-                  className={`relative w-full h-full rounded-full ${isPortrait ? 'border-2' : 'border-4'} flex items-center justify-center cursor-pointer z-30 bg-gray-900 transition-all duration-300
+                  className={`relative w-full h-full rounded-full border-2 md:border-[3px] flex items-center justify-center cursor-pointer z-30 bg-gray-900 transition-all duration-300 overflow-visible
                   ${colorClass} 
-                  ${nightInfo?.seat.id===s.id?'ring-4 ring-yellow-400 scale-110 shadow-[0_0_30px_yellow]':''} 
+                  ${nightInfo?.seat.id===s.id?'ring-4 md:ring-6 ring-yellow-400 scale-110 shadow-[0_0_30px_yellow]':''} 
                   ${s.isDead?'grayscale opacity-60':''} 
-                  ${selectedActionTargets.includes(s.id)?'ring-4 ring-green-500 scale-105':''}
-                  ${longPressingSeats.has(s.id)?'ring-4 ring-blue-400 animate-pulse':''}
-                `}
+                  ${selectedActionTargets.includes(s.id)?'ring-4 md:ring-6 ring-green-500 scale-105':''}
+                  ${longPressingSeats.has(s.id)?'ring-4 md:ring-6 ring-blue-400 animate-pulse':''}
+                  `}
                 >
                 {/* 长按进度指示器 */}
                 {longPressingSeats.has(s.id) && (
                   <div className="absolute inset-0 rounded-full border-4 border-blue-400 animate-ping opacity-75"></div>
                 )}
                 {/* 座位号 - 左上角 */}
-                <div className={`absolute ${isPortrait ? '-top-2 -left-2 w-5 h-5 text-[10px]' : '-top-5 -left-5 w-9 h-9 text-base'} bg-gray-800 rounded-full border-2 border-gray-600 flex items-center justify-center font-bold z-40`}>
+                <div className="absolute -top-2 -left-2 w-5 h-5 text-[10px] md:-top-6 md:-left-6 md:w-12 md:h-12 md:text-xl bg-gray-800 rounded-full border-2 md:border-3 border-gray-600 flex items-center justify-center font-bold z-50 md:z-[999]">
                   {s.id+1}
-                  </div>
+                </div>
                 
                 {/* 角色名称 */}
                 <span 
-                  className="font-bold text-center leading-tight px-1 whitespace-nowrap"
-                  style={{ fontSize: `${(isPortrait ? 8 : 14) * seatScale}px` }}
+                  className="font-bold text-center leading-tight px-1 whitespace-nowrap overflow-visible md:text-lg"
+                  style={{ fontSize: `${(isPortrait ? 8 : 18) * seatScale}px` }}
                 >
                   {roleName}
                 </span>
                 
                 {/* 状态图标 - 底部 */}
                 <div className={`absolute ${isPortrait ? '-bottom-1.5' : '-bottom-3'} flex gap-0.5`}>
-                  {s.isPoisoned&&<span className={isPortrait ? 'text-xs' : 'text-lg'} title="中毒">🧪</span>}
-                  {s.isProtected&&<span className={isPortrait ? 'text-xs' : 'text-lg'} title="受保护">🛡️</span>}
-                  {s.isRedHerring&&<span className={isPortrait ? 'text-xs' : 'text-lg'} title="这是占卜师的固定误判对象。">😈</span>}
+                  {s.isPoisoned&&<span className={isPortrait ? 'text-xs' : 'text-2xl'} title="中毒">🧪</span>}
+                  {s.isProtected&&<span className={isPortrait ? 'text-xs' : 'text-2xl'} title="受保护">🛡️</span>}
+                  {s.isRedHerring&&<span className={isPortrait ? 'text-xs' : 'text-2xl'} title="这是占卜师的固定误判对象。">😈</span>}
                 </div>
                 {/* 状态徽标 - 内环底部 */}
                 <div 
-                  className={`absolute inset-x-0.5 ${isPortrait ? 'bottom-0.5' : 'bottom-2'} flex flex-wrap gap-0.5 justify-center leading-tight text-center`}
-                  style={{ fontSize: `${(isPortrait ? 6 : 10) * seatScale}px` }}
+                  className={`absolute inset-x-0.5 ${isPortrait ? 'bottom-0.5' : 'bottom-2'} flex flex-nowrap gap-0.5 justify-center leading-tight text-center overflow-visible`}
+                  style={{ fontSize: `${(isPortrait ? 6 : 14) * seatScale}px` }}
                 >
                   {(s.statusDetails || []).map(st => (
                     <span key={st} className="px-2 py-0.5 rounded-full bg-gray-800/90 border border-gray-600 text-yellow-200 whitespace-nowrap text-center">{st}</span>
@@ -7530,16 +7701,16 @@ export default function Home() {
                 </div>
                 
                 {/* 右上角提示区域 */}
-                <div className={`absolute ${isPortrait ? '-top-1.5 -right-1.5' : '-top-5 -right-5'} flex flex-col gap-0.5 items-end z-40`}>
+                <div className={`absolute ${isPortrait ? '-top-1.5 -right-1.5' : '-top-6 -right-6'} flex flex-col gap-0.5 items-end z-40`}>
                   {/* 主人标签 */}
                   {seats.some(seat => seat.masterId === s.id) && (
-                    <span className={`${isPortrait ? 'text-[7px] px-0.5 py-0.5' : 'text-xs px-2 py-0.5'} bg-purple-600 rounded-full shadow font-bold`}>
+                    <span className={`${isPortrait ? 'text-[7px] px-0.5 py-0.5' : 'text-base md:text-lg px-2 py-1 whitespace-nowrap'} bg-purple-600 rounded-full shadow font-bold`}>
                       主人
                     </span>
                   )}
                   {/* 处决台标签 */}
                   {s.isCandidate && (
-                    <span className={`${isPortrait ? 'text-[7px] px-0.5 py-0.5' : 'text-xs px-2 py-0.5'} bg-red-600 rounded-full shadow font-bold animate-pulse`}>
+                    <span className={`${isPortrait ? 'text-[7px] px-0.5 py-0.5' : 'text-base md:text-lg px-2 py-1 whitespace-nowrap'} bg-red-600 rounded-full shadow font-bold animate-pulse`}>
                       ⚖️{s.voteCount}
                     </span>
                   )}
@@ -7548,33 +7719,32 @@ export default function Home() {
               </div>
             );
               })}
+            </div>
           </div>
+        </div>
       </div>
 
-      <div className={`${isPortrait ? 'w-full order-1 border-b' : 'w-2/5 h-screen border-l'} flex flex-col border-gray-800 z-40 transition-all duration-500 ${
-        gamePhase === 'scriptSelection' 
-          ? 'bg-gray-800/90' 
-          : 'bg-gray-900/95'
-      }`}>
-        <div className={`px-4 ${isPortrait ? 'py-2 pb-3' : 'py-2 pb-4'} border-b flex items-center justify-between relative`}>
-          <span className={`font-bold text-purple-400 ${isPortrait ? 'text-lg' : 'text-xl scale-[1.3]'} flex items-center justify-center ${isPortrait ? 'h-7' : 'h-8'} flex-shrink-0`}>控制台</span>
+      {/* ===== 右侧：控制中枢侧边栏 ===== */}
+      <div className="w-96 h-full flex flex-col border-l border-gray-700 bg-gray-800 shrink-0 z-40">
+        <div className="px-4 py-2 pb-3 md:pb-4 border-b flex items-center justify-between relative flex-shrink-0">
+          <span className="font-bold text-purple-400 text-lg md:text-xl md:scale-[1.3] flex items-center justify-center h-7 md:h-8 flex-shrink-0">控制台</span>
           <div className="flex items-center flex-shrink-0 gap-1">
             <button 
               onClick={()=>setShowGameRecordsModal(true)} 
-              className={`${isPortrait ? 'px-2 py-1 text-sm h-7' : 'px-2 py-1 text-sm h-8 scale-[1.3] mr-[28px]'} bg-green-600 border rounded shadow-lg flex items-center justify-center flex-shrink-0`}
+              className="px-2 py-1 text-sm h-7 md:h-8 md:scale-[1.3] md:mr-[28px] bg-green-600 border rounded shadow-lg flex items-center justify-center flex-shrink-0"
             >
               对局记录
             </button>
             <button 
               onClick={()=>setShowReviewModal(true)} 
-              className={`${isPortrait ? 'px-2 py-1 text-sm h-7' : 'px-2 py-1 text-sm h-8 scale-[1.3] mr-[22px]'} bg-indigo-600 border rounded shadow-lg flex items-center justify-center flex-shrink-0`}
+              className="px-2 py-1 text-sm h-7 md:h-8 md:scale-[1.3] md:mr-[22px] bg-indigo-600 border rounded shadow-lg flex items-center justify-center flex-shrink-0"
             >
               复盘
             </button>
             <div className="relative flex-shrink-0">
               <button 
                 onClick={(e)=>{e.stopPropagation();setShowMenu(!showMenu)}} 
-                className={`${isPortrait ? 'px-2 py-1 text-sm h-7' : 'px-2 py-1 text-sm h-8 scale-[1.3]'} bg-gray-800 border rounded shadow-lg flex items-center justify-center`}
+                className="px-2 py-1 text-sm h-7 md:h-8 md:scale-[1.3] bg-gray-800 border rounded shadow-lg flex items-center justify-center"
               >
                 ☰
               </button>
@@ -7611,8 +7781,7 @@ export default function Home() {
           {nightInfo && (
             <span 
               ref={currentActionTextRef}
-              className={`${isPortrait ? 'text-xl' : 'text-3xl'} font-bold text-white absolute left-1/2 -translate-x-1/2 top-full mt-2 whitespace-nowrap text-center overflow-hidden`}
-              style={{ maxWidth: '100%' }}
+              className={`${isPortrait ? 'text-xl' : 'text-3xl'} font-bold text-white absolute left-1/2 -translate-x-1/2 top-full mt-2 whitespace-nowrap text-center overflow-visible`}
             >
               当前是第{currentNightNumber}夜：轮到
               <span className="text-yellow-300">
@@ -7627,29 +7796,143 @@ export default function Home() {
             </span>
           )}
         </div>
-          <div ref={consoleContentRef} className={`flex-1 overflow-y-auto ${isPortrait ? 'p-3' : 'p-4'} ${isPortrait ? 'text-sm' : 'text-base'}`}>
+          <div ref={consoleContentRef} className="flex-1 overflow-y-auto p-3 md:p-4 text-sm md:text-base">
           {/* 剧本选择页面 */}
           {gamePhase==='scriptSelection' && (
             <div className="flex flex-col items-center justify-center min-h-full">
               <h2 className="text-4xl font-bold mb-2 text-white">选择剧本</h2>
               <p className="text-gray-400 italic mb-8">更多剧本开发中…</p>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6 w-full max-w-4xl">
-                {scripts.map(script => (
+                {scriptCards.map(script => (
                   <button
                     key={script.id}
                     onClick={() => {
+                      if (script.id === 'custom') {
+                        setShowScriptBuilder(true);
+                        return;
+                      }
                       // 保存选择剧本前的状态到历史记录
                       saveHistory();
                       setSelectedScript(script);
+                      setCustomSelectedIds([]);
+                      setCustomSelectedRoles([]);
                       setGameLogs([]); // 选择新剧本时清空之前的游戏记录
                       setGamePhase('setup');
                     }}
                     className="p-8 bg-gray-800 border-4 border-gray-600 rounded-2xl hover:border-blue-500 hover:bg-gray-700 transition-all text-center flex flex-col items-center justify-center"
                   >
-                    <div className="text-2xl font-bold text-white mb-2">{script.name}</div>
+                    <div className="text-2xl font-bold text-white mb-2 whitespace-nowrap overflow-visible">{script.name}</div>
                     <div className="text-sm text-gray-400">难度：{script.difficulty}</div>
                   </button>
                 ))}
+              </div>
+            </div>
+          )}
+          {showScriptBuilder && (
+            <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+              <div className="w-full max-w-6xl bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl p-4 md:p-6 flex flex-col gap-4 max-h-[90vh] overflow-hidden">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-xl font-bold text-white">🛠️ 自定义剧本构建器</div>
+                    <div className="text-sm text-gray-400">选择任意角色组合，立即开始一局混搭</div>
+                  </div>
+                  <button
+                    onClick={() => setShowScriptBuilder(false)}
+                    className="px-3 py-2 text-sm rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-200 border border-gray-600"
+                  >
+                    关闭
+                  </button>
+                </div>
+
+                <div className="flex flex-col md:flex-row gap-3">
+                  <input
+                    value={customSearch}
+                    onChange={e => setCustomSearch(e.target.value)}
+                    placeholder="按中文名称/描述搜索角色..."
+                    className="flex-1 px-3 py-2 rounded-lg bg-gray-800 border border-gray-700 text-sm text-white focus:outline-none focus:border-blue-500"
+                  />
+                  <div className="flex gap-2">
+                    {[
+                      { key: 'all', label: '全部' },
+                      { key: 'townsfolk', label: '镇民' },
+                      { key: 'outsider', label: '外来者' },
+                      { key: 'minion', label: '爪牙' },
+                      { key: 'demon', label: '恶魔' },
+                    ].map(tab => (
+                      <button
+                        key={tab.key}
+                        onClick={() => setCustomTypeFilter(tab.key as RoleType | 'all')}
+                        className={`px-3 py-2 rounded-lg text-sm font-bold border transition ${
+                          customTypeFilter === tab.key
+                            ? 'bg-blue-600 border-blue-400 text-white'
+                            : 'bg-gray-800 border-gray-700 text-gray-300 hover:border-gray-500'
+                        }`}
+                      >
+                        {tab.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="flex-1 overflow-y-auto space-y-4 pr-1">
+                  {(['townsfolk','outsider','minion','demon'] as RoleType[]).map(type => {
+                    const list = groupedCustomRolePool[type];
+                    if (!list || list.length === 0) return null;
+                    return (
+                      <div key={type}>
+                        <div className="text-sm text-gray-300 mb-2 font-bold">
+                          {typeLabels[type]}（{list.length}）
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-3">
+                          {list.map(role => {
+                            const selected = customSelectedIds.includes(role.id);
+                            return (
+                              <button
+                                key={role.id}
+                                onClick={() => toggleCustomRole(role.id)}
+                                className={`text-left p-3 rounded-xl border transition ${
+                                  selected
+                                    ? 'border-blue-400 bg-blue-900/40'
+                                    : 'border-gray-700 bg-gray-800/60 hover:border-gray-500'
+                                }`}
+                              >
+                                <div className="flex items-center justify-between mb-1">
+                                  <span className="font-bold text-white">{role.name}</span>
+                                  <span className="text-xs text-gray-400">{role.type}</span>
+                                </div>
+                                <div className="text-xs text-gray-400 leading-snug line-clamp-2">{role.ability}</div>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 border-t border-gray-700 pt-3">
+                  <div className="text-sm text-gray-300">
+                    已选：T:{customSelectionCounts.townsfolk} | O:{customSelectionCounts.outsider} | M:{customSelectionCounts.minion} | D:{customSelectionCounts.demon}
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => {
+                        setCustomSelectedIds([]);
+                        setCustomSelectedRoles([]);
+                      }}
+                      className="px-4 py-2 rounded-lg bg-gray-800 border border-gray-700 text-sm text-gray-300 hover:border-gray-500"
+                    >
+                      清空选择
+                    </button>
+                    <button
+                      onClick={startCustomGame}
+                      className="px-4 py-2 rounded-lg bg-green-600 hover:bg-green-500 text-sm font-bold text-white shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                      disabled={customSelectedIds.length === 0}
+                    >
+                      开始游戏
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
           )}
@@ -7673,10 +7956,10 @@ export default function Home() {
               },
               {
                 roleId: 'amnesiac',
-                title: '失意者每日猜测',
+                title: '失忆者每日猜测',
                 description: '每个白天一次，向说书人提交本回合的猜测并获得反馈。',
                 usage: 'daily',
-                logMessage: seat => `${seat.id+1}号(失意者) 提交今日猜测，请给出反馈`
+                logMessage: seat => `${seat.id+1}号(失忆者) 提交今日猜测，请给出反馈`
               },
               {
                 roleId: 'fisherman',
@@ -8239,7 +8522,8 @@ export default function Home() {
           )}
         </div>
         
-      <div className="p-4 border-t border-gray-700 bg-gray-900 flex gap-3 justify-center z-50">
+        {/* ===== 底部：操作按钮区 ===== */}
+        <div className="p-4 border-t border-gray-700 bg-gray-900 flex gap-3 justify-center flex-shrink-0 z-50">
           {gamePhase==='setup' && (
             <button 
               onClick={handlePreStartNight} 
@@ -8958,7 +9242,7 @@ export default function Home() {
               alert('请填写猜测和反馈。');
               return;
             }
-            addLog(`${seat.id+1}号(失意者) 今日猜测：${dayAbilityForm.guess}；反馈：${dayAbilityForm.feedback}`);
+            addLog(`${seat.id+1}号(失忆者) 今日猜测：${dayAbilityForm.guess}；反馈：${dayAbilityForm.feedback}`);
             setDayAbilityLogs(prev => [...prev, { id: seat.id, roleId, day: nightCount, text: `猜测：${dayAbilityForm.guess}；反馈：${dayAbilityForm.feedback}` }]);
             markDailyAbilityUsed('amnesiac', seat.id);
             closeModal();
@@ -9227,7 +9511,7 @@ export default function Home() {
           <div className="bg-gray-800 p-8 rounded-2xl w-[600px] border-2 border-purple-500">
             <h2 className="text-2xl font-bold mb-6 text-center">🧛 (中毒) 编造结果</h2>
             <div className="grid grid-cols-3 gap-3">
-              {roles.map(r=>(
+              {uniqueRoles.map(r=>(
                 <button 
                   key={r.id} 
                   onClick={()=>confirmRavenkeeperFake(r)} 
@@ -9370,6 +9654,32 @@ export default function Home() {
       {gamePhase==="gameOver" && (
         <div className="fixed inset-0 z-[4000] bg-black/95 flex items-center justify-center">
           <div className="text-center">
+            {/* 异端反转警告 */}
+            {(() => {
+              const heretic = seats.find(s => 
+                s.role?.id === 'heretic' && 
+                !s.isDead && 
+                !s.appearsDead &&
+                !s.isPoisoned &&
+                !s.isDrunk
+              );
+              if (heretic) {
+                return (
+                  <div className="mb-6 p-4 bg-red-900/50 border-2 border-red-500 rounded-lg animate-pulse">
+                    <div className="text-3xl font-bold text-red-300 mb-2">
+                      🔄 胜负规则已反转 (HERETIC ACTIVE)
+                    </div>
+                    <div className="text-lg text-yellow-300">
+                      恶魔死亡 = 输 | 恶魔存活 = 赢
+                    </div>
+                    <div className="text-sm text-gray-400 mt-2">
+                      异端位置: [{heretic.id + 1}号] {heretic.role?.name || '未知角色'}
+                    </div>
+                  </div>
+                );
+              }
+              return null;
+            })()}
             <h1 className={`text-8xl font-bold mb-10 ${
               winResult==='good'?'text-blue-500':'text-red-500'
             }`}>
@@ -9691,8 +10001,16 @@ export default function Home() {
           const currentScriptRoleIds = new Set(
             Object.values(filteredGroupedRoles).flat().map(r => r.id)
           );
-          const other = roles.filter(r => !currentScriptRoleIds.has(r.id));
-          return other.reduce((acc, role) => {
+          // 使用去重后的 uniqueRoles，并再次去重确保没有重复
+          const other = uniqueRoles.filter(r => !currentScriptRoleIds.has(r.id));
+          const uniqueOtherMap = new Map<string, Role>();
+          other.forEach(role => {
+            if (!uniqueOtherMap.has(role.id)) {
+              uniqueOtherMap.set(role.id, role);
+            }
+          });
+          const uniqueOther = Array.from(uniqueOtherMap.values());
+          return uniqueOther.reduce((acc, role) => {
             if (!acc[role.type]) acc[role.type] = [];
             acc[role.type].push(role);
             return acc;
@@ -9711,13 +10029,16 @@ export default function Home() {
                 {title}
               </h2>
             )}
-            {Object.entries(rolesToShow).map(([type, roleList]) => (
+            {Object.entries(rolesToShow).map(([type, roleList]) => {
+              // 对 roleList 进行去重，确保每个角色 id 只出现一次
+              const uniqueRoleList = Array.from(new Map(roleList.map(item => [item.id, item])).values());
+              return (
               <div key={type} className="bg-gray-900/50 p-6 rounded-xl">
                 <h3 className={`text-2xl font-bold mb-4 ${typeColors[type]}`}>
                   {typeLabels[type]}
                 </h3>
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                  {roleList.map((role) => (
+                  {uniqueRoleList.map((role) => (
                     <div 
                       key={role.id} 
                       className={`p-4 border-2 rounded-lg ${typeColors[type]} ${typeBgColors[type]} transition-all hover:scale-105`}
@@ -9733,7 +10054,8 @@ export default function Home() {
                   ))}
                 </div>
               </div>
-            ))}
+              );
+            })}
           </div>
         );
 
@@ -10004,7 +10326,7 @@ export default function Home() {
                             }
                           >
                             <option value="">（未选择）</option>
-                            {roles.map(r => (
+                            {uniqueRoles.map(r => (
                               <option key={r.id} value={r.id}>
                                 {r.name} ({typeLabels[r.type]?.replace(/^[🔵🟣🟠🔴]\s*/, '') || r.type})
                               </option>
@@ -10058,7 +10380,7 @@ export default function Home() {
               目标：{showPitHagModal.targetId !== null ? `${showPitHagModal.targetId+1}号` : '未选择'}
             </div>
             <div className="text-xs text-purple-300">
-              麻脸巫婆只能将玩家变成本局尚未登场的角色。已在场的角色不会出现在列表中。
+              麻脸巫婆只能将玩家变成"夜半狂欢"剧本的角色。已在场的角色也会显示在列表中，但选中后无事发生。
             </div>
             <select
               className="w-full bg-gray-900 border border-gray-600 rounded p-2"
@@ -10070,11 +10392,20 @@ export default function Home() {
                 const usedRoleIds = new Set(
                   seats.map(s => getSeatRoleId(s)).filter(Boolean) as string[]
                 );
-                return roles
-                  .filter(r => !usedRoleIds.has(r.id))
-                  .map(r=>(
-                    <option key={r.id} value={r.id}>{r.name} ({r.type})</option>
-                  ));
+                // 夜半狂欢的麻脸巫婆只能选择"夜半狂欢"剧本的角色（包括已存在的角色）
+                const midnightRevelryRoles = getRolesByScript('midnight_revelry');
+                return midnightRevelryRoles
+                  .map(r=>{
+                    const isUsed = usedRoleIds.has(r.id);
+                    return (
+                      <option 
+                        key={r.id} 
+                        value={r.id}
+                      >
+                        {r.name} ({typeLabels[r.type]?.replace(/^[🔵🟣🟠🔴]\s*/, '') || r.type}){isUsed ? ' (已存在)' : ''}
+                      </option>
+                    );
+                  });
               })()}
             </select>
             <div className="flex gap-3 justify-end">
@@ -10950,6 +11281,166 @@ export default function Home() {
                   )}
                 </div>
 
+                {/* ========== BMR 剧本状态监控 ========== */}
+                
+                {/* 1. 僵尸透视镜 (Zombuul Monitor) */}
+                {(() => {
+                  const zombuulSeat = seats.find(s => s.role?.id === 'zombuul');
+                  if (zombuulSeat) {
+                    const isAppearsDead = zombuulSeat.appearsDead === true || 
+                                         (zombuulSeat.isFirstDeathForZombuul && !zombuulSeat.isZombuulTrulyDead);
+                    const isTrulyDead = zombuulSeat.isZombuulTrulyDead === true;
+                    return (
+                      <div className="mb-2 pb-2 border-b border-gray-700">
+                        <div className="text-[11px] font-semibold text-green-300 mb-1">
+                          🧟 僵尸透视镜 (Zombuul Monitor)
+                        </div>
+                        <div className="text-[11px] ml-2">
+                          {isTrulyDead ? (
+                            <span className="text-red-400 font-bold">💀 Zombuul: TRULY DEAD</span>
+                          ) : isAppearsDead ? (
+                            <span className="text-yellow-400 font-bold">🧟 Zombuul: ALIVE (Appears Dead)</span>
+                          ) : (
+                            <span className="text-green-400 font-bold">🧟 Zombuul: ALIVE</span>
+                          )}
+                          <span className="text-gray-400 ml-2">
+                            [{zombuulSeat.id + 1}号] | 
+                            Lives: {zombuulSeat.zombuulLives ?? 1} | 
+                            {zombuulSeat.isPoisoned && ' 🔴 中毒'} 
+                            {zombuulSeat.isDrunk && ' 🍺 醉酒'}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  }
+                  return null;
+                })()}
+
+                {/* 2. 普卡毒链 (Pukka Chain) */}
+                {(() => {
+                  const pukkaSeat = seats.find(s => s.role?.id === 'pukka');
+                  if (pukkaSeat && pukkaPoisonQueue.length > 0) {
+                    const tonightPoisoned = pukkaPoisonQueue.filter(q => q.nightsUntilDeath > 0);
+                    const nextNightDeath = pukkaPoisonQueue.filter(q => q.nightsUntilDeath === 1);
+                    return (
+                      <div className="mb-2 pb-2 border-b border-gray-700">
+                        <div className="text-[11px] font-semibold text-purple-300 mb-1">
+                          🐍 普卡毒链 (Pukka Chain)
+                        </div>
+                        <div className="text-[10px] ml-2 text-purple-200">
+                          {nextNightDeath.length > 0 && (
+                            <div className="mb-1">
+                              <span className="text-red-400 font-bold">[明晚将死]</span>
+                              {' '}
+                              {nextNightDeath.map(q => {
+                                const target = seats.find(s => s.id === q.targetId);
+                                return target ? `[${target.id + 1}号]` : `[${q.targetId + 1}号]`;
+                              }).join('、')}
+                            </div>
+                          )}
+                          {tonightPoisoned.length > 0 && (
+                            <div>
+                              <span className="text-yellow-400 font-bold">[今晚中毒]</span>
+                              {' '}
+                              {tonightPoisoned.map(q => {
+                                const target = seats.find(s => s.id === q.targetId);
+                                return target ? `[${target.id + 1}号]` : `[${q.targetId + 1}号]`;
+                              }).join('、')}
+                              {' '}
+                              <span className="text-gray-400">
+                                ({tonightPoisoned[0]?.nightsUntilDeath ?? 0}晚后死亡)
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  }
+                  // 如果普卡存在但没有队列，显示当前目标（如果有）
+                  if (pukkaSeat && pukkaPoisonQueue.length === 0) {
+                    return (
+                      <div className="mb-2 pb-2 border-b border-gray-700">
+                        <div className="text-[11px] font-semibold text-purple-300 mb-1">
+                          🐍 普卡毒链 (Pukka Chain)
+                        </div>
+                        <div className="text-[10px] ml-2 text-gray-400">
+                          暂无中毒目标
+                        </div>
+                      </div>
+                    );
+                  }
+                  return null;
+                })()}
+
+                {/* 3. 珀充能状态 (Po Charge) */}
+                {(() => {
+                  const poSeat = seats.find(s => s.role?.id === 'po');
+                  if (poSeat) {
+                    const isCharged = poChargeState[poSeat.id] === true;
+                    return (
+                      <div className="mb-2 pb-2 border-b border-gray-700">
+                        <div className="text-[11px] font-semibold text-blue-300 mb-1">
+                          ⚡ 珀充能状态 (Po Charge)
+                        </div>
+                        <div className="text-[11px] ml-2">
+                          {isCharged ? (
+                            <span className="text-green-400 font-bold">🟢 PO CHARGED (3 Kills Ready)</span>
+                          ) : (
+                            <span className="text-gray-400">⚪ No Charge</span>
+                          )}
+                          <span className="text-gray-400 ml-2">
+                            [{poSeat.id + 1}号]
+                            {poSeat.isPoisoned && ' 🔴 中毒'} 
+                            {poSeat.isDrunk && ' 🍺 醉酒'}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  }
+                  return null;
+                })()}
+
+                {/* 4. 主谋倒计时 (Mastermind Day) */}
+                {(() => {
+                  const deadDemon = seats.find(s => {
+                    const isDemon = s.role?.type === 'demon' || s.isDemonSuccessor;
+                    if (!isDemon) return false;
+                    // 检查是否真正死亡（排除假死）
+                    if (s.role?.id === 'zombuul') {
+                      return s.isZombuulTrulyDead === true;
+                    }
+                    if (s.appearsDead === true) return false;
+                    if (s.role?.id === 'zombuul' && s.isFirstDeathForZombuul && !s.isZombuulTrulyDead) return false;
+                    return s.isDead;
+                  });
+                  
+                  const mastermind = seats.find(s => 
+                    s.role?.id === 'mastermind' && 
+                    !s.isDead && 
+                    !s.appearsDead
+                  );
+                  
+                  // 检查是否主谋触发（恶魔已死但游戏继续）
+                  const gameResult = calculateGameResult(seats, evilTwinPair, executedPlayerId);
+                  const isMastermindActive = deadDemon && mastermind && gameResult === null;
+                  
+                  if (isMastermindActive) {
+                    return (
+                      <div className="mb-2 pb-2 border-b border-red-700 bg-red-900/20 rounded px-2 py-1">
+                        <div className="text-[11px] font-bold text-red-300 mb-1 animate-pulse">
+                          🧠 MASTERMIND ACTIVE: Good must execute a Minion today or LOSE!
+                        </div>
+                        <div className="text-[10px] ml-2 text-red-400">
+                          恶魔已死: [{deadDemon.id + 1}号] {deadDemon.role?.name || '未知'} | 
+                          主谋存活: [{mastermind.id + 1}号] | 
+                          游戏继续至下一个白天
+                        </div>
+                      </div>
+                    );
+                  }
+                  return null;
+                })()}
+
                 {/* 方古 / 老巫婆 等角色变更日志（高亮） */}
                 {roleChangeLogs.length > 0 && (
                   <div className="mb-2 pb-2 border-b border-gray-700">
@@ -11113,6 +11604,205 @@ export default function Home() {
                   </div>
                 )}
 
+                {/* ========== 实验性角色高危状态监控 ========== */}
+                
+                {/* 1. 🔄 异端反转警报 (Heretic Flip) */}
+                {(() => {
+                  const heretic = seats.find(s => 
+                    s.role?.id === 'heretic' && 
+                    !s.isDead && 
+                    !s.appearsDead &&
+                    !s.isPoisoned &&
+                    !s.isDrunk
+                  );
+                  if (heretic) {
+                    return (
+                      <div className="mb-2 pb-2 border-b-2 border-red-500 bg-red-900/50 rounded px-3 py-2 animate-pulse">
+                        <div className="text-[13px] font-bold text-red-200 mb-2 text-center">
+                          ⚠️ 规则已反转：恶魔存活则好人赢，恶魔死亡则邪恶赢！
+                        </div>
+                        <div className="text-[11px] ml-2 text-red-300 font-semibold">
+                          异端位置: [{heretic.id + 1}号] {heretic.role?.name || '未知角色'}
+                        </div>
+                        <div className="text-[10px] ml-2 text-yellow-200 mt-1 font-semibold">
+                          🔄 HERETIC ACTIVE - 胜负规则完全颠倒
+                        </div>
+                      </div>
+                    );
+                  }
+                  return null;
+                })()}
+
+                {/* 2. ⏳ 利维坦末日时钟 (Leviathan Clock) */}
+                {(() => {
+                  const leviathan = seats.find(s => 
+                    s.role?.id === 'leviathan' && 
+                    !s.isDead && 
+                    !s.appearsDead
+                  );
+                  if (leviathan) {
+                    // 计算当前回合数（天数）：nightCount 代表当前是第几轮
+                    const currentRound = nightCount;
+                    const isFinalDay = currentRound >= 5;
+                    const progress = Math.min((currentRound / 5) * 100, 100);
+                    
+                    return (
+                      <div className={`mb-2 pb-2 border-b ${isFinalDay ? 'border-red-700 bg-red-900/30' : 'border-orange-700'} rounded px-2 py-1`}>
+                        <div className="text-[11px] font-semibold text-orange-300 mb-1">
+                          ⏳ 利维坦末日时钟 (Leviathan Clock)
+                        </div>
+                        <div className="text-[10px] ml-2 text-orange-200 mb-1">
+                          利维坦位置: [{leviathan.id + 1}号] {leviathan.role?.name || '未知角色'}
+                          {leviathan.isPoisoned && ' 🔴 中毒'} 
+                          {leviathan.isDrunk && ' 🍺 醉酒'}
+                        </div>
+                        <div className="mb-1">
+                          <div className="flex items-center justify-between text-[10px] mb-1">
+                            <span className="text-gray-300">Day {currentRound}/5</span>
+                            <span className={isFinalDay ? 'text-red-400 font-bold' : 'text-orange-300'}>
+                              {progress.toFixed(0)}%
+                            </span>
+                          </div>
+                          <div className="w-full bg-gray-700 rounded-full h-2">
+                            <div 
+                              className={`h-2 rounded-full transition-all ${
+                                isFinalDay ? 'bg-red-500' : 'bg-orange-500'
+                              }`}
+                              style={{ width: `${progress}%` }}
+                            />
+                          </div>
+                        </div>
+                        {isFinalDay && (
+                          <div className="text-[11px] font-bold text-red-400 animate-pulse mt-1">
+                            ⚠️ FINAL DAY: Good must execute Leviathan today!
+                          </div>
+                        )}
+                      </div>
+                    );
+                  }
+                  return null;
+                })()}
+
+                {/* 3. 👹 军团计数器 (Legion Counter) */}
+                {(() => {
+                  const allLegions = seats.filter(s => s.role?.id === 'legion');
+                  const livingLegions = allLegions.filter(s => {
+                    // 僵怖假死状态仍视为存活
+                    if (s.appearsDead === true) return true;
+                    if (s.role?.id === 'zombuul' && s.isFirstDeathForZombuul && !s.isZombuulTrulyDead) return true;
+                    return !s.isDead;
+                  });
+                  
+                  if (allLegions.length > 0) {
+                    return (
+                      <div className="mb-2 pb-2 border-b border-purple-700 bg-purple-900/20 rounded px-2 py-1">
+                        <div className="text-[11px] font-semibold text-purple-300 mb-1">
+                          👹 军团计数器 (Legion Counter)
+                        </div>
+                        <div className="text-[11px] ml-2 text-purple-200 font-bold mb-1">
+                          Alive Legions: {livingLegions.length} / {allLegions.length}
+                        </div>
+                        <div className="text-[10px] ml-2 text-yellow-300">
+                          ⚠️ Must kill ALL Legions to win.
+                        </div>
+                        <div className="text-[10px] ml-2 text-purple-300 mt-1">
+                          {livingLegions.map(legion => (
+                            <div key={legion.id}>
+                              [{legion.id + 1}号] {legion.role?.name || '未知角色'}
+                              {legion.isPoisoned && ' 🔴 中毒'} 
+                              {legion.isDrunk && ' 🍺 醉酒'}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  }
+                  return null;
+                })()}
+
+                {/* 4. 💀 哈迪寂亚选择模拟 (Al-Hadikhia Sim) - 在日志中显示 */}
+                {(() => {
+                  // 查找最近的哈迪寂亚行动日志
+                  const hadesiaLogs = gameLogs
+                    .filter(log => {
+                      const msg = log.message.toLowerCase();
+                      return msg.includes('哈迪寂亚') || 
+                             msg.includes('hadesia') ||
+                             (msg.includes('选择了') && msg.includes('号') && msg.includes(':'));
+                    })
+                    .slice(-5); // 最近5条
+                  
+                  if (hadesiaLogs.length > 0) {
+                    return (
+                      <div className="mb-2 pb-2 border-b border-gray-700">
+                        <div className="text-[11px] font-semibold text-cyan-300 mb-1">
+                          💀 哈迪寂亚选择模拟 (Al-Hadikhia Sim)
+                        </div>
+                        <div className="text-[10px] ml-2 space-y-1">
+                          {hadesiaLogs.map((log, idx) => {
+                            // 解析日志中的选择信息
+                            const hasAllDie = log.message.includes('全部死亡') || log.message.includes('全死');
+                            const targetMatch = log.message.match(/\[(\d+)号:([生死])\]/g);
+                            
+                            // 提取选择"死"的玩家
+                            const dieTargets: string[] = [];
+                            const liveTargets: string[] = [];
+                            if (targetMatch) {
+                              targetMatch.forEach(match => {
+                                const parts = match.match(/(\d+)号:([生死])/);
+                                if (parts) {
+                                  if (parts[2] === '死') {
+                                    dieTargets.push(parts[1]);
+                                  } else {
+                                    liveTargets.push(parts[1]);
+                                  }
+                                }
+                              });
+                            }
+                            
+                            return (
+                              <div key={`${log.day}-${log.phase}-${idx}`} className="text-cyan-200 border-l border-cyan-500 pl-2 mb-1">
+                                <div className="text-[9px] text-gray-400 mb-0.5">
+                                  第{log.day}轮 / {log.phase}
+                                </div>
+                                {targetMatch && targetMatch.length > 0 && (
+                                  <div className="mb-1">
+                                    <span className="text-cyan-300 font-semibold">选定目标: </span>
+                                    <span className="text-yellow-300">
+                                      {targetMatch.map((match, i) => {
+                                        const parts = match.match(/(\d+)号:([生死])/);
+                                        if (!parts) return null;
+                                        return (
+                                          <span key={i}>
+                                            {parts[1]}号{parts[2] === '死' ? '(死)' : '(生)'}
+                                            {i < targetMatch.length - 1 && '、'}
+                                          </span>
+                                        );
+                                      })}
+                                    </span>
+                                  </div>
+                                )}
+                                {hasAllDie ? (
+                                  <div className="text-red-400 font-bold">
+                                    模拟结果: [全死] - 三名玩家都选择"生"，全部死亡
+                                  </div>
+                                ) : dieTargets.length > 0 ? (
+                                  <div className="text-yellow-400 font-bold">
+                                    模拟结果: [{dieTargets.join('、')}号 牺牲] - 选择"死"的玩家死亡
+                                  </div>
+                                ) : (
+                                  <div className="text-gray-400 text-[9px]">{log.message}</div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  }
+                  return null;
+                })()}
+
                 {/* ========== Demon Seat 实时监控 ========== */}
                 {demonSeats.length > 0 && (
                   <div className="mb-2 pb-2 border-b border-gray-700">
@@ -11242,7 +11932,7 @@ export default function Home() {
                               onClick={(e) => e.stopPropagation()}
                             >
                               <option value="">请选择赋予的能力...</option>
-                              {roles.map(r => (
+                              {uniqueRoles.map(r => (
                                 <option key={r.id} value={r.id}>
                                   {r.name} ({typeLabels[r.type]?.replace(/^[🔵🟣🟠🔴]\s*/, '')})
                                 </option>

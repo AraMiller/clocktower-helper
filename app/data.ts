@@ -72,6 +72,9 @@ export interface Seat {
   isZombuulTrulyDead?: boolean; // 僵怖真正死亡标记（第二次被处决后）
   zombuulLives?: number; // 僵怖剩余可"假死"次数（默认1）
   amnesiacAbilityId?: string; // 失忆者：说书人赋予的隐藏角色ID，用于夜晚行动顺序和能力代理
+  appearsDead?: boolean; // 假死状态（用于僵怖等角色）：看起来已死，但实际存活
+  isPoCharged?: boolean; // 珀的蓄力状态：如果为 true，下回合可以杀3人
+  hasUsedFoolAbility?: boolean; // 弄臣：是否已使用过第一次死亡免疫
 }
 
 export interface LogEntry {
@@ -107,24 +110,11 @@ export interface Script {
   description?: string;
 }
 
-// 剧本列表
-export const scripts: Script[] = [
-  { 
-    id: "trouble_brewing", 
-    name: "暗流涌动", 
-    difficulty: "初学者",
-    description: "当【男爵 (Baron)】在场时，系统会自动将 2 名镇民替换为 2 名外来者。"
-  },
-  { id: "bad_moon_rising", name: "暗月初升", difficulty: "中等" },
-  { id: "sects_and_violets", name: "梦陨春宵", difficulty: "中等" },
-  { id: "midnight_revelry", name: "夜半狂欢", difficulty: "困难" },
-];
-
 // ======================================================================
-//  角色数据 - 22个角色 (Trouble Brewing)
-// 当前文件中定义的所有角色均为「暗流涌动角色」（暗流涌动剧本 / 游戏的第一部分）
+//  统一角色库 (Master Role Registry)
+// 所有角色定义在此，后续剧本通过 ID 子集引用
 // ======================================================================
-export const roles: Role[] = [
+const rawRoles: Role[] = [
   // ========== 镇民 (Townsfolk) - 13个 ==========
   { 
     id: "washerwoman", 
@@ -1247,7 +1237,7 @@ export const roles: Role[] = [
   },
   { 
     id: "amnesiac", 
-    name: "失意者", 
+    name: "失忆者", 
     type: "townsfolk", 
     ability: "你不知道你的能力是什么。每个白天你可以询问说书人一次猜测，你会得知你的猜测有多准确。", 
     fullDescription: "你不知道你的能力是什么。每个白天你可以询问说书人一次猜测,你会得知你的猜测有多准确。",
@@ -1497,10 +1487,205 @@ export const roles: Role[] = [
     nightActionType: "kill", 
     firstNightReminder: "认队友", 
     otherNightReminder: "选择三名目标"
+  },
+
+  // ======================================================================
+  //  角色数据 - 陨梦春宵 (Experimental) - 实验性角色
+  // ======================================================================
+  
+  // ========== 镇民 (Townsfolk) - 实验性 ==========
+  { 
+    id: "heretic", 
+    name: "异端", 
+    type: "townsfolk", 
+    ability: "如果异端在场（且未中毒），胜负规则完全颠倒。", 
+    fullDescription: "如果异端在场（且未中毒），胜负规则完全颠倒。恶魔死亡 = 输，恶魔存活 = 赢。",
+    script: "陨梦春宵",
+    firstNight: false, 
+    otherNight: false, 
+    firstNightOrder: 0, 
+    otherNightOrder: 0, 
+    nightActionType: "none"
+  },
+  // 注意：atheist (无神论者) 已在"夜半狂欢"剧本中定义（第1334行），此处不再重复定义
+
+  // ========== 爪牙 (Minion) - 实验性 ==========
+  { 
+    id: "goblin", 
+    name: "哥布林", 
+    type: "minion", 
+    ability: "如果你被处决且公开声明你是哥布林，邪恶阵营获胜。", 
+    fullDescription: "如果你被处决且公开声明你是哥布林,邪恶阵营获胜。",
+    script: "陨梦春宵",
+    firstNight: false, 
+    otherNight: false, 
+    firstNightOrder: 0, 
+    otherNightOrder: 0, 
+    nightActionType: "none"
+  },
+  { 
+    id: "boomdandy", 
+    name: "暴乱丹迪", 
+    type: "minion", 
+    ability: "如果你被处决，除你以外的所有其他玩家死亡。", 
+    fullDescription: "如果你被处决,除你以外的所有其他玩家死亡。",
+    script: "陨梦春宵",
+    firstNight: false, 
+    otherNight: false, 
+    firstNightOrder: 0, 
+    otherNightOrder: 0, 
+    nightActionType: "none"
+  },
+
+  // ========== 恶魔 (Demon) - 实验性 ==========
+  { 
+    id: "legion", 
+    name: "军团", 
+    type: "demon", 
+    ability: "场上有多个军团（视为恶魔）。只有当所有军团都死亡时，好人才算胜利。", 
+    fullDescription: "场上有多个军团（视为恶魔）。只有当所有军团都死亡时,好人才算胜利。",
+    script: "陨梦春宵",
+    firstNight: true, 
+    otherNight: false, 
+    firstNightOrder: 2, 
+    otherNightOrder: 0, 
+    nightActionType: "none",
+    firstNightReminder: "认队友"
+  },
+  { 
+    id: "leviathan", 
+    name: "利维坦", 
+    type: "demon", 
+    ability: "第 5 天结束时，如果利维坦还活着，邪恶直接胜利。", 
+    fullDescription: "第 5 天结束时,如果利维坦还活着,邪恶直接胜利。",
+    script: "陨梦春宵",
+    firstNight: true, 
+    otherNight: false, 
+    firstNightOrder: 2, 
+    otherNightOrder: 0, 
+    nightActionType: "none",
+    firstNightReminder: "认队友"
   }
 ];
 
-export const groupedRoles = roles.reduce((acc, role) => {
+// ======================================================================
+//  去重处理：确保每个角色 ID 只出现一次，作为单一数据源
+// ======================================================================
+export const MASTER_ROLES: Role[] = Array.from(
+  new Map(rawRoles.map(item => [item.id, item])).values()
+);
+
+// 角色索引表，便于快速查找
+const ROLE_MAP = new Map(MASTER_ROLES.map(role => [role.id, role]));
+
+// 向后兼容：保留 allRoles / roles 的导出
+export const allRoles = MASTER_ROLES;
+export { allRoles as roles };
+
+// ======================================================================
+//  剧本定义：通过角色 ID 列表引用角色
+// ======================================================================
+export interface ScriptDefinition {
+  id: string;
+  name: string;
+  difficulty: string;
+  description?: string;
+  roleIds: string[]; // 该剧本包含的角色 ID 列表
+}
+
+// 剧本角色 ID 列表（作为单一数据源的子集引用）
+const scriptRoleIds: Record<string, string[]> = {
+  trouble_brewing: [
+    // 镇民
+    "washerwoman", "librarian", "investigator", "chef", "empath", 
+    "fortune_teller", "undertaker", "monk", "ravenkeeper", "virgin", 
+    "slayer", "soldier", "mayor",
+    // 外来者
+    "butler", "drunk", "recluse", "saint",
+    // 爪牙
+    "poisoner", "spy", "scarlet_woman", "baron",
+    // 恶魔
+    "imp"
+  ],
+  bad_moon_rising: [
+    // 镇民
+    "grandmother", "sailor", "chambermaid", "exorcist", "innkeeper", 
+    "gambler", "gossip", "courtier", "professor", "minstrel", 
+    "tea_lady", "pacifist", "fool",
+    // 外来者
+    "tinker", "moonchild", "goon", "lunatic",
+    // 爪牙
+    "godfather", "devils_advocate", "assassin", "mastermind",
+    // 恶魔
+    "zombuul", "pukka", "shabaloth", "po"
+  ],
+  sects_and_violets: [
+    // 镇民
+    "clockmaker", "dreamer", "snake_charmer", "mathematician", "flowergirl", 
+    "town_crier", "oracle", "savant", "seamstress", "philosopher", 
+    "artist", "juggler", "sage",
+    // 外来者
+    "mutant", "sweetheart", "barber", "klutz",
+    // 爪牙
+    "evil_twin", "witch", "cerenovus", "pit_hag",
+    // 恶魔
+    "fang_gu", "vigormortis", "no_dashii", "vortox"
+  ],
+  midnight_revelry: [
+    // 镇民
+    "professor_mr", "snake_charmer_mr", "savant_mr", "noble", "balloonist", 
+    "amnesiac", "engineer", "fisherman", "ranger", "farmer", 
+    "poppy_grower", "atheist", "cannibal",
+    // 外来者
+    "drunk_mr", "barber_mr", "damsel", "golem",
+    // 爪牙
+    "poisoner_mr", "pit_hag_mr", "lunatic_mr", "shaman",
+    // 恶魔
+    "vigormortis_mr", "hadesia"
+  ],
+  experimental: [
+    // 实验性角色
+    "heretic", "goblin", "boomdandy", "legion", "leviathan"
+  ]
+};
+
+// ======================================================================
+//  工具方法：基于 MASTER_ROLES 的查询接口
+// ======================================================================
+export const getAllRoles = (): Role[] =>
+  [...MASTER_ROLES].sort(
+    (a, b) =>
+      a.type.localeCompare(b.type) ||
+      a.name.localeCompare(b.name, "zh-Hans-u-co-pinyin")
+  );
+
+export const getRolesByScript = (scriptId: string): Role[] => {
+  const ids = scriptRoleIds[scriptId] || [];
+  return ids.map(id => ROLE_MAP.get(id)).filter((r): r is Role => Boolean(r));
+};
+
+export const getRoleById = (roleId: string): Role | undefined => ROLE_MAP.get(roleId);
+
+// 更新剧本定义，添加 roleIds
+export const scripts: Script[] = [
+  { 
+    id: "trouble_brewing", 
+    name: "暗流涌动", 
+    difficulty: "初学者",
+    description: "当【男爵 (Baron)】在场时，系统会自动将 2 名镇民替换为 2 名外来者。"
+  },
+  { id: "bad_moon_rising", name: "暗月初升", difficulty: "中等" },
+  { id: "sects_and_violets", name: "梦陨春宵", difficulty: "中等" },
+  { id: "midnight_revelry", name: "夜半狂欢", difficulty: "困难" },
+];
+
+// 获取所有实验性角色
+export const getExperimentalRoles = (): Role[] => {
+  return getRolesByScript('experimental');
+};
+
+// 按类型分组的角色（使用去重后的 MASTER_ROLES）
+export const groupedRoles = MASTER_ROLES.reduce((acc, role) => {
   if (!acc[role.type]) acc[role.type] = [];
   acc[role.type].push(role);
   return acc;
